@@ -69,7 +69,7 @@ async fn tag_create_without_colors_omits_them() {
 async fn tag_update_hits_name_path() {
     let server = MockServer::start().await;
     Mock::given(method("PUT"))
-        .and(path("/api/v2/space/790/tag/high+priority"))
+        .and(path("/api/v2/space/790/tag/high%20priority"))
         .and(body_json(json!({"tag": {"name": "blocked"}})))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"name": "blocked"})))
         .expect(1)
@@ -91,7 +91,7 @@ async fn tag_update_hits_name_path() {
 async fn tag_delete_hits_encoded_name_path_and_synthesizes_ack() {
     let server = MockServer::start().await;
     Mock::given(method("DELETE"))
-        .and(path("/api/v2/space/790/tag/high+priority"))
+        .and(path("/api/v2/space/790/tag/high%20priority"))
         .respond_with(ResponseTemplate::new(204))
         .expect(1)
         .mount(&server)

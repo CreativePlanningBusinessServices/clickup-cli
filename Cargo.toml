@@ -14,6 +14,7 @@ thiserror = "2"
 keyring = { version = "3", features = ["apple-native", "windows-native"] }
 directories = "6"
 url = "2"
+percent-encoding = "2"
 toml = "0.8"
 self_update = { version = "0.42", default-features = false, features = ["rustls", "archive-zip", "compression-zip-deflate"] }
 rpassword = "7"

@@ -250,6 +250,7 @@ dependencies = [
  "clap",
  "directories",
  "keyring",
+ "percent-encoding",
  "predicates",
  "reqwest",
  "rpassword",
