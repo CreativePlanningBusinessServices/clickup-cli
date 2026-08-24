@@ -6,7 +6,9 @@ use serde_json::Value;
 
 use crate::client::CuClient;
 use crate::commands;
-use crate::commands::{account, comment, config_cmd, folder, list, raw, space, task, workspace};
+use crate::commands::{
+    account, checklist, comment, config_cmd, folder, list, raw, space, task, workspace,
+};
 use crate::context::{DEFAULT_BASE, context_for};
 use crate::error::CliError;
 use crate::output;
@@ -93,6 +95,11 @@ pub enum Command {
     Comment {
         #[command(subcommand)]
         action: CommentAction,
+    },
+    /// Checklists on a task, and their items
+    Checklist {
+        #[command(subcommand)]
+        action: ChecklistAction,
     },
 }
 
@@ -683,6 +690,75 @@ pub enum CommentAction {
     },
 }
 
+#[derive(Subcommand)]
+pub enum ChecklistAction {
+    /// Create a checklist on a task
+    #[command(after_help = "Example: clickup-cli checklist create 868k5a5wa --name \"QA steps\"")]
+    Create {
+        task_id: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long = "custom-id")]
+        custom_id: bool,
+    },
+    /// Update a checklist
+    #[command(
+        after_help = "Example: clickup-cli checklist update cl1 --data '{\"name\": \"Renamed\"}'"
+    )]
+    Update {
+        checklist_id: String,
+        #[arg(long)]
+        data: Option<String>,
+    },
+    /// Delete a checklist
+    #[command(after_help = "Example: clickup-cli checklist delete cl1")]
+    Delete { checklist_id: String },
+    /// Add, update, or remove an item on a checklist
+    Item {
+        #[command(subcommand)]
+        action: ChecklistItemAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ChecklistItemAction {
+    /// Add an item to a checklist
+    #[command(
+        after_help = "Example: clickup-cli checklist item add CHECKLIST_ID --name \"run tests\" --assignee 75413867"
+    )]
+    Add {
+        checklist_id: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        assignee: Option<String>,
+        /// Request body: inline JSON, @file, or - for stdin; merged under --name/--assignee
+        #[arg(long)]
+        data: Option<String>,
+    },
+    /// Update a checklist item
+    #[command(
+        after_help = "Example: clickup-cli checklist item update CHECKLIST_ID ITEM_ID --data '{\"resolved\":true}'"
+    )]
+    Update {
+        checklist_id: String,
+        item_id: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        assignee: Option<String>,
+        /// Request body: inline JSON, @file, or - for stdin; merged under --name/--assignee
+        #[arg(long)]
+        data: Option<String>,
+    },
+    /// Remove an item from a checklist
+    #[command(after_help = "Example: clickup-cli checklist item remove CHECKLIST_ID ITEM_ID")]
+    Remove {
+        checklist_id: String,
+        item_id: String,
+    },
+}
+
 pub async fn cli_main() -> i32 {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -755,6 +831,7 @@ async fn dispatch(cli: &Cli) -> Result<Value, CliError> {
         Command::List { action } => dispatch_list(cli, action).await,
         Command::Task { action } => dispatch_task(cli, action).await,
         Command::Comment { action } => dispatch_comment(cli, action).await,
+        Command::Checklist { action } => dispatch_checklist(cli, action).await,
     }
 }
 
@@ -1159,6 +1236,60 @@ async fn dispatch_comment(cli: &Cli, action: &CommentAction) -> Result<Value, Cl
     }
 }
 
+async fn dispatch_checklist(cli: &Cli, action: &ChecklistAction) -> Result<Value, CliError> {
+    let context = context_for(cli.account.as_deref(), cli.workspace.as_deref())?;
+    match action {
+        ChecklistAction::Create {
+            task_id,
+            name,
+            custom_id,
+        } => checklist::create(&context.client, task_id, *custom_id, name).await,
+        ChecklistAction::Update { checklist_id, data } => {
+            let body = commands::parse_data_flag(data.as_deref())?;
+            checklist::update(&context.client, checklist_id, body).await
+        }
+        ChecklistAction::Delete { checklist_id } => {
+            checklist::delete(&context.client, checklist_id).await
+        }
+        ChecklistAction::Item { action } => dispatch_checklist_item(&context.client, action).await,
+    }
+}
+
+async fn dispatch_checklist_item(
+    client: &CuClient,
+    action: &ChecklistItemAction,
+) -> Result<Value, CliError> {
+    match action {
+        ChecklistItemAction::Add {
+            checklist_id,
+            name,
+            assignee,
+            data,
+        } => {
+            let mut body = commands::parse_data_flag(data.as_deref())?;
+            commands::merge_flag(&mut body, "name", name.clone());
+            commands::merge_flag(&mut body, "assignee", assignee.clone());
+            checklist::item_add(client, checklist_id, body).await
+        }
+        ChecklistItemAction::Update {
+            checklist_id,
+            item_id,
+            name,
+            assignee,
+            data,
+        } => {
+            let mut body = commands::parse_data_flag(data.as_deref())?;
+            commands::merge_flag(&mut body, "name", name.clone());
+            commands::merge_flag(&mut body, "assignee", assignee.clone());
+            checklist::item_update(client, checklist_id, item_id, body).await
+        }
+        ChecklistItemAction::Remove {
+            checklist_id,
+            item_id,
+        } => checklist::item_remove(client, checklist_id, item_id).await,
+    }
+}
+
 fn dispatch_config(action: &ConfigAction) -> Result<Value, CliError> {
     let config_path = crate::config::default_config_path()?;
     match action {
@@ -1381,6 +1512,46 @@ mod tests {
     #[test]
     fn comment_create_requires_text() {
         expect_parse_error(&["clickup-cli", "comment", "create", "--task", "868k5a5wa"]);
+    }
+
+    #[test]
+    fn checklist_create_parses() {
+        Cli::try_parse_from([
+            "clickup-cli",
+            "checklist",
+            "create",
+            "868k5a5wa",
+            "--name",
+            "QA steps",
+        ])
+        .expect("checklist create should parse");
+    }
+
+    #[test]
+    fn checklist_item_add_and_update_parse() {
+        Cli::try_parse_from([
+            "clickup-cli",
+            "checklist",
+            "item",
+            "add",
+            "cl1",
+            "--name",
+            "run tests",
+            "--assignee",
+            "75413867",
+        ])
+        .expect("checklist item add should parse");
+        Cli::try_parse_from([
+            "clickup-cli",
+            "checklist",
+            "item",
+            "update",
+            "cl1",
+            "item1",
+            "--data",
+            r#"{"resolved":true}"#,
+        ])
+        .expect("checklist item update should parse");
     }
 
     #[test]
