@@ -3,7 +3,8 @@ use std::io::IsTerminal;
 use clap::{Parser, Subcommand};
 use serde_json::Value;
 
-use crate::commands::{account, config_cmd};
+use crate::commands;
+use crate::commands::{account, config_cmd, raw};
 use crate::context::{DEFAULT_BASE, context_for};
 use crate::error::CliError;
 use crate::output;
@@ -43,6 +44,45 @@ pub enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Send an arbitrary request to any ClickUp API endpoint
+    #[command(
+        after_help = "Example: clickup-cli raw GET /api/v2/team/9001/guest/42\n\nUse this to reach enterprise-only endpoints (like guests) that don't have a dedicated subcommand."
+    )]
+    Raw {
+        #[arg(value_enum, ignore_case = true)]
+        method: HttpMethodArg,
+        path: String,
+        /// Repeatable key=value query parameter
+        #[arg(long = "query")]
+        query: Vec<String>,
+        /// Repeatable 'Name: value' header
+        #[arg(long = "header")]
+        header: Vec<String>,
+        /// Request body: inline JSON, @file, or - for stdin
+        #[arg(long)]
+        data: Option<String>,
+    },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum HttpMethodArg {
+    Get,
+    Post,
+    Put,
+    Patch,
+    Delete,
+}
+
+impl HttpMethodArg {
+    fn to_method(self) -> reqwest::Method {
+        match self {
+            HttpMethodArg::Get => reqwest::Method::GET,
+            HttpMethodArg::Post => reqwest::Method::POST,
+            HttpMethodArg::Put => reqwest::Method::PUT,
+            HttpMethodArg::Patch => reqwest::Method::PATCH,
+            HttpMethodArg::Delete => reqwest::Method::DELETE,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -128,6 +168,30 @@ async fn dispatch(cli: &Cli) -> Result<Value, CliError> {
     match &cli.command {
         Command::Account { action } => dispatch_account(cli, action).await,
         Command::Config { action } => dispatch_config(action),
+        Command::Raw {
+            method,
+            path,
+            query,
+            header,
+            data,
+        } => {
+            let query_pairs = commands::parse_key_value_pairs(query)?;
+            let header_pairs = commands::parse_header_pairs(header)?;
+            let body = data
+                .as_ref()
+                .map(|arg| commands::read_data_arg(arg))
+                .transpose()?;
+            let context = context_for(cli.account.as_deref(), cli.workspace.as_deref())?;
+            raw::call(
+                &context.client,
+                method.to_method(),
+                path,
+                &query_pairs,
+                &header_pairs,
+                body,
+            )
+            .await
+        }
     }
 }
 

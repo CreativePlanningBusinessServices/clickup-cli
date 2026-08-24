@@ -1,5 +1,6 @@
 pub mod account;
 pub mod config_cmd;
+pub mod raw;
 
 use std::io::Read;
 
@@ -34,6 +35,21 @@ pub fn parse_key_value_pairs(pairs: &[String]) -> Result<Vec<(String, String)>, 
                 .split_once('=')
                 .ok_or_else(|| CliError::Usage(format!("expected key=value, got '{pair}'")))?;
             Ok((key.to_string(), value.to_string()))
+        })
+        .collect()
+}
+
+/// Parses repeated `--header 'Name: value'` flags for the raw command.
+pub fn parse_header_pairs(pairs: &[String]) -> Result<Vec<(String, String)>, CliError> {
+    pairs
+        .iter()
+        .map(|pair| {
+            let (name, value) = pair.split_once(':').ok_or_else(|| {
+                CliError::Usage(format!(
+                    "--header must be in 'Name: value' form, got '{pair}'"
+                ))
+            })?;
+            Ok((name.trim().to_string(), value.trim().to_string()))
         })
         .collect()
 }
@@ -88,6 +104,21 @@ mod tests {
     #[test]
     fn rejects_pair_without_equals() {
         let result = parse_key_value_pairs(&["status".to_string()]);
+        assert!(matches!(result, Err(CliError::Usage(_))));
+    }
+
+    #[test]
+    fn parses_header_pairs_trimming_whitespace() {
+        let pairs = parse_header_pairs(&["X-Custom-Header:  test-value ".to_string()]).unwrap();
+        assert_eq!(
+            pairs,
+            vec![("X-Custom-Header".to_string(), "test-value".to_string())]
+        );
+    }
+
+    #[test]
+    fn rejects_header_pair_without_colon() {
+        let result = parse_header_pairs(&["X-Custom-Header".to_string()]);
         assert!(matches!(result, Err(CliError::Usage(_))));
     }
 }
