@@ -74,6 +74,62 @@ pub async fn merge_task_pages(
     Ok(json!({"items": items, "count": items.len(), "hasMore": has_more}))
 }
 
+/// Shared v3 cursor pagination — reused by task attachments (Task 11), docs (Task 17), and
+/// chat (Task 18). Without `fetch_all`, issues a single request against `base_query` (which
+/// already carries a `cursor` pair if the caller wants one page from a specific offset) and
+/// passes its body through unchanged. With `fetch_all`, loops starting with no cursor,
+/// merging each page's `body[items_key]` array into one envelope:
+/// `{"items": [...], "count": n, "hasMore": bool}`. A page stops the loop once
+/// `next_cursor` comes back null, absent, or an empty string; the next page's request
+/// carries that cursor as a `?cursor=` query pair. Hitting `MAX_PAGES` without a natural
+/// stop truncates the loop and reports `hasMore: true` rather than fetching forever.
+pub async fn merge_cursor_pages(
+    client: &CuClient,
+    path: &str,
+    base_query: &[(String, String)],
+    items_key: &str,
+    fetch_all: bool,
+) -> Result<Value, CliError> {
+    if !fetch_all {
+        let response = client
+            .request(reqwest::Method::GET, path, base_query, None)
+            .await?;
+        return Ok(pass_through(response));
+    }
+
+    let mut items: Vec<Value> = Vec::new();
+    let mut has_more = false;
+    let mut cursor: Option<String> = None;
+    for page_number in 0..MAX_PAGES {
+        let mut query = base_query.to_vec();
+        if let Some(cursor_value) = &cursor {
+            query.push(("cursor".to_string(), cursor_value.clone()));
+        }
+        let response = client
+            .request(reqwest::Method::GET, path, &query, None)
+            .await?;
+        let body = pass_through(response);
+        let page_items = body[items_key].as_array().cloned().unwrap_or_default();
+        items.extend(page_items);
+
+        let next_cursor = body
+            .get("next_cursor")
+            .and_then(Value::as_str)
+            .filter(|cursor_value| !cursor_value.is_empty());
+        match next_cursor {
+            Some(next_cursor_value) => {
+                cursor = Some(next_cursor_value.to_string());
+                if page_number + 1 == MAX_PAGES {
+                    has_more = true;
+                }
+            }
+            None => break,
+        }
+    }
+
+    Ok(json!({"items": items, "count": items.len(), "hasMore": has_more}))
+}
+
 /// Query pairs for `--custom-id`: ClickUp requires `custom_task_ids=true` and `team_id`
 /// together to resolve a task by its custom id (e.g. `DEV-123`) instead of its ClickUp id.
 /// Returns an empty query when `custom_id` is false.

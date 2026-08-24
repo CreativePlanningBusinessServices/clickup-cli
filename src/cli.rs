@@ -1,8 +1,10 @@
 use std::io::IsTerminal;
+use std::path::PathBuf;
 
 use clap::{ArgGroup, Parser, Subcommand};
 use serde_json::Value;
 
+use crate::client::CuClient;
 use crate::commands;
 use crate::commands::{account, config_cmd, folder, list, raw, space, task, workspace};
 use crate::context::{DEFAULT_BASE, context_for};
@@ -458,6 +460,149 @@ pub enum TaskAction {
         #[arg(long)]
         all: bool,
     },
+    /// Move a task into a different list
+    #[command(after_help = "Example: clickup-cli task move 868k5a5wa 125")]
+    Move { task_id: String, list_id: String },
+    /// Merge one or more source tasks into a target task
+    #[command(after_help = "Example: clickup-cli task merge TARGET --source id1 --source id2")]
+    Merge {
+        target_task_id: String,
+        /// Repeatable; task ids to merge into target_task_id
+        #[arg(long = "source", required = true)]
+        source: Vec<String>,
+    },
+    /// Create a task from a list's task template
+    #[command(
+        after_help = "Example: clickup-cli task from-template 124 tmpl_1 --name \"Sprint 12 kickoff\""
+    )]
+    FromTemplate {
+        list_id: String,
+        template_id: String,
+        #[arg(long)]
+        name: String,
+    },
+    /// List the members assigned to a task
+    #[command(after_help = "Example: clickup-cli task members 868k5a5wa")]
+    Members { task_id: String },
+    /// Time a task (or tasks) has spent in each status
+    #[command(
+        after_help = "Examples:\n  clickup-cli task time-in-status 868k5a5wa\n  clickup-cli task time-in-status id1 id2\n\nMore than one id switches to the bulk endpoint."
+    )]
+    TimeInStatus {
+        #[arg(required = true)]
+        task_ids: Vec<String>,
+        #[arg(long = "custom-id")]
+        custom_id: bool,
+    },
+    /// Add or remove a tag on a task
+    Tag {
+        #[command(subcommand)]
+        action: TaskTagAction,
+    },
+    /// Add or remove a dependency link between two tasks
+    Dependency {
+        #[command(subcommand)]
+        action: TaskDependencyAction,
+    },
+    /// Add or remove a link between two tasks
+    Link {
+        #[command(subcommand)]
+        action: TaskLinkAction,
+    },
+    /// Attach a local file to a task
+    #[command(after_help = "Example: clickup-cli task attach 868k5a5wa ./report.pdf")]
+    Attach {
+        task_id: String,
+        file_path: PathBuf,
+        /// Filename to send with the upload; defaults to file_path's own filename
+        #[arg(long)]
+        filename: Option<String>,
+        #[arg(long = "custom-id")]
+        custom_id: bool,
+    },
+    /// List a task's attachments
+    #[command(after_help = "Example: clickup-cli task attachments 868k5a5wa --all")]
+    Attachments {
+        task_id: String,
+        /// Fetch one page starting from this cursor
+        #[arg(long)]
+        cursor: Option<String>,
+        /// Fetch and merge every page instead of just one
+        #[arg(long)]
+        all: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum TaskTagAction {
+    /// Add a tag to a task
+    #[command(after_help = "Example: clickup-cli task tag add 868k5a5wa urgent")]
+    Add {
+        task_id: String,
+        tag_name: String,
+        #[arg(long = "custom-id")]
+        custom_id: bool,
+    },
+    /// Remove a tag from a task
+    #[command(after_help = "Example: clickup-cli task tag remove 868k5a5wa urgent")]
+    Remove {
+        task_id: String,
+        tag_name: String,
+        #[arg(long = "custom-id")]
+        custom_id: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum TaskDependencyAction {
+    /// Add a dependency link between two tasks
+    #[command(
+        after_help = "Example: clickup-cli task dependency add 868k5a5wa --depends-on other1",
+        group(ArgGroup::new("dependency_direction_add").args(["depends_on", "dependency_of"]).required(true).multiple(false))
+    )]
+    Add {
+        task_id: String,
+        #[arg(long = "depends-on")]
+        depends_on: Option<String>,
+        #[arg(long = "dependency-of")]
+        dependency_of: Option<String>,
+        #[arg(long = "custom-id")]
+        custom_id: bool,
+    },
+    /// Remove a dependency link between two tasks
+    #[command(
+        after_help = "Example: clickup-cli task dependency remove 868k5a5wa --depends-on other1",
+        group(ArgGroup::new("dependency_direction_remove").args(["depends_on", "dependency_of"]).required(true).multiple(false))
+    )]
+    Remove {
+        task_id: String,
+        #[arg(long = "depends-on")]
+        depends_on: Option<String>,
+        #[arg(long = "dependency-of")]
+        dependency_of: Option<String>,
+        #[arg(long = "custom-id")]
+        custom_id: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum TaskLinkAction {
+    /// Link two tasks together
+    #[command(after_help = "Example: clickup-cli task link add 868k5a5wa other2")]
+    Add {
+        task_id: String,
+        links_to: String,
+        #[arg(long = "custom-id")]
+        custom_id: bool,
+    },
+    /// Remove a link between two tasks
+    #[command(after_help = "Example: clickup-cli task link remove 868k5a5wa other2")]
+    Remove {
+        task_id: String,
+        links_to: String,
+        #[arg(long = "custom-id")]
+        custom_id: bool,
+    },
 }
 
 pub async fn cli_main() -> i32 {
@@ -763,6 +908,116 @@ async fn dispatch_task(cli: &Cli, action: &TaskAction) -> Result<Value, CliError
             };
             task::filter(&context.client, &args, *page, *all).await
         }
+        TaskAction::Move { task_id, list_id } => {
+            task::move_task(&context.client, task_id, list_id).await
+        }
+        TaskAction::Merge {
+            target_task_id,
+            source,
+        } => task::merge(&context.client, target_task_id, source).await,
+        TaskAction::FromTemplate {
+            list_id,
+            template_id,
+            name,
+        } => task::from_template(&context.client, list_id, template_id, name).await,
+        TaskAction::Members { task_id } => task::members(&context.client, task_id).await,
+        TaskAction::TimeInStatus {
+            task_ids,
+            custom_id,
+        } => task::time_in_status(&context.client, task_ids, *custom_id).await,
+        TaskAction::Tag { action } => dispatch_task_tag(&context.client, action).await,
+        TaskAction::Dependency { action } => {
+            dispatch_task_dependency(&context.client, action).await
+        }
+        TaskAction::Link { action } => dispatch_task_link(&context.client, action).await,
+        TaskAction::Attach {
+            task_id,
+            file_path,
+            filename,
+            custom_id,
+        } => {
+            task::attach(
+                &context.client,
+                task_id,
+                file_path,
+                filename.clone(),
+                *custom_id,
+            )
+            .await
+        }
+        TaskAction::Attachments {
+            task_id,
+            cursor,
+            all,
+        } => task::attachments(&context.client, task_id, cursor.clone(), *all).await,
+    }
+}
+
+async fn dispatch_task_tag(client: &CuClient, action: &TaskTagAction) -> Result<Value, CliError> {
+    match action {
+        TaskTagAction::Add {
+            task_id,
+            tag_name,
+            custom_id,
+        } => task::tag_add(client, task_id, tag_name, *custom_id).await,
+        TaskTagAction::Remove {
+            task_id,
+            tag_name,
+            custom_id,
+        } => task::tag_remove(client, task_id, tag_name, *custom_id).await,
+    }
+}
+
+async fn dispatch_task_dependency(
+    client: &CuClient,
+    action: &TaskDependencyAction,
+) -> Result<Value, CliError> {
+    match action {
+        TaskDependencyAction::Add {
+            task_id,
+            depends_on,
+            dependency_of,
+            custom_id,
+        } => {
+            task::dependency_add(
+                client,
+                task_id,
+                depends_on.as_deref(),
+                dependency_of.as_deref(),
+                *custom_id,
+            )
+            .await
+        }
+        TaskDependencyAction::Remove {
+            task_id,
+            depends_on,
+            dependency_of,
+            custom_id,
+        } => {
+            task::dependency_remove(
+                client,
+                task_id,
+                depends_on.as_deref(),
+                dependency_of.as_deref(),
+                *custom_id,
+            )
+            .await
+        }
+    }
+}
+
+async fn dispatch_task_link(client: &CuClient, action: &TaskLinkAction) -> Result<Value, CliError> {
+    match action {
+        TaskLinkAction::Add {
+            task_id,
+            links_to,
+            custom_id,
+        } => task::link_add(client, task_id, links_to, *custom_id).await,
+        TaskLinkAction::Remove {
+            task_id,
+            links_to,
+            custom_id,
+        } => task::link_remove(client, task_id, links_to, *custom_id).await,
     }
 }
 
