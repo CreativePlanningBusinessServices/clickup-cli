@@ -1,6 +1,7 @@
 pub mod account;
 pub mod config_cmd;
 pub mod folder;
+pub mod list;
 pub mod raw;
 pub mod space;
 pub mod workspace;

@@ -1,10 +1,10 @@
 use std::io::IsTerminal;
 
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, Parser, Subcommand};
 use serde_json::Value;
 
 use crate::commands;
-use crate::commands::{account, config_cmd, folder, raw, space, workspace};
+use crate::commands::{account, config_cmd, folder, list, raw, space, workspace};
 use crate::context::{DEFAULT_BASE, context_for};
 use crate::error::CliError;
 use crate::output;
@@ -76,6 +76,11 @@ pub enum Command {
     Folder {
         #[command(subcommand)]
         action: FolderAction,
+    },
+    /// Lists within a folder or a space
+    List {
+        #[command(subcommand)]
+        action: ListAction,
     },
 }
 
@@ -255,6 +260,76 @@ pub enum FolderAction {
     },
 }
 
+#[derive(Subcommand)]
+pub enum ListAction {
+    /// List lists in a folder, or the folderless lists directly in a space
+    #[command(
+        after_help = "Examples:\n  clickup-cli list list --folder 457\n  clickup-cli list list --space 790 --archived",
+        group(ArgGroup::new("list_location").args(["folder", "space"]).required(true).multiple(false))
+    )]
+    List {
+        #[arg(long)]
+        folder: Option<String>,
+        #[arg(long)]
+        space: Option<String>,
+        #[arg(long)]
+        archived: bool,
+    },
+    /// Get a single list
+    #[command(after_help = "Example: clickup-cli list get 124")]
+    Get { list_id: String },
+    /// Create a list in a folder, or a folderless list directly in a space
+    #[command(
+        after_help = "Example: clickup-cli list create --space 790 --name \"Sprint 12\"",
+        group(ArgGroup::new("create_location").args(["folder", "space"]).required(true).multiple(false))
+    )]
+    Create {
+        #[arg(long)]
+        folder: Option<String>,
+        #[arg(long)]
+        space: Option<String>,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        data: Option<String>,
+    },
+    /// Update a list
+    #[command(after_help = "Example: clickup-cli list update 124 --data '{\"name\": \"Renamed\"}'")]
+    Update {
+        list_id: String,
+        #[arg(long)]
+        data: Option<String>,
+    },
+    /// Delete a list
+    #[command(after_help = "Example: clickup-cli list delete 124")]
+    Delete { list_id: String },
+    /// List the members of a list
+    #[command(after_help = "Example: clickup-cli list members 124")]
+    Members { list_id: String },
+    /// Create a list from a list template
+    #[command(
+        after_help = "Example: clickup-cli list from-template --folder 457 tmpl_1 --name \"Sprint 12\"",
+        group(ArgGroup::new("template_location").args(["folder", "space"]).required(true).multiple(false))
+    )]
+    FromTemplate {
+        #[arg(long)]
+        folder: Option<String>,
+        #[arg(long)]
+        space: Option<String>,
+        template_id: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        data: Option<String>,
+    },
+    /// Add a task to a list; requires the Tasks in Multiple Lists ClickApp
+    #[command(after_help = "Example: clickup-cli list add-task 124 abc123")]
+    AddTask { list_id: String, task_id: String },
+    /// Remove a task from a list
+    #[command(after_help = "Example: clickup-cli list remove-task 124 abc123")]
+    RemoveTask { list_id: String, task_id: String },
+}
+
 pub async fn cli_main() -> i32 {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -324,6 +399,7 @@ async fn dispatch(cli: &Cli) -> Result<Value, CliError> {
         Command::Workspace { action } => dispatch_workspace(cli, action).await,
         Command::Space { action } => dispatch_space(cli, action).await,
         Command::Folder { action } => dispatch_folder(cli, action).await,
+        Command::List { action } => dispatch_list(cli, action).await,
     }
 }
 
@@ -393,6 +469,66 @@ async fn dispatch_folder(cli: &Cli, action: &FolderAction) -> Result<Value, CliE
             let mut body = commands::parse_data_flag(data.as_deref())?;
             commands::merge_flag(&mut body, "name", Some(name.clone()));
             folder::from_template(&context.client, space_id, template_id, body).await
+        }
+    }
+}
+
+async fn dispatch_list(cli: &Cli, action: &ListAction) -> Result<Value, CliError> {
+    let context = context_for(cli.account.as_deref(), cli.workspace.as_deref())?;
+    match action {
+        ListAction::List {
+            folder,
+            space,
+            archived,
+        } => {
+            list::list(
+                &context.client,
+                folder.as_deref(),
+                space.as_deref(),
+                *archived,
+            )
+            .await
+        }
+        ListAction::Get { list_id } => list::get(&context.client, list_id).await,
+        ListAction::Create {
+            folder,
+            space,
+            name,
+            data,
+        } => {
+            let mut body = commands::parse_data_flag(data.as_deref())?;
+            commands::merge_flag(&mut body, "name", Some(name.clone()));
+            list::create(&context.client, folder.as_deref(), space.as_deref(), body).await
+        }
+        ListAction::Update { list_id, data } => {
+            let body = commands::parse_data_flag(data.as_deref())?;
+            list::update(&context.client, list_id, body).await
+        }
+        ListAction::Delete { list_id } => list::delete(&context.client, list_id).await,
+        ListAction::Members { list_id } => list::members(&context.client, list_id).await,
+        ListAction::FromTemplate {
+            folder,
+            space,
+            template_id,
+            name,
+            data,
+        } => {
+            let mut body = commands::parse_data_flag(data.as_deref())?;
+            commands::merge_flag(&mut body, "name", Some(name.clone()));
+            list::from_template(
+                &context.client,
+                folder.as_deref(),
+                space.as_deref(),
+                template_id,
+                body,
+            )
+            .await
+        }
+        ListAction::AddTask { list_id, task_id } => {
+            list::add_task(&context.client, list_id, task_id).await
+        }
+        ListAction::RemoveTask { list_id, task_id } => {
+            list::remove_task(&context.client, list_id, task_id).await
         }
     }
 }
@@ -566,5 +702,48 @@ mod tests {
         assert_eq!(cli.account.as_deref(), Some("work"));
         assert_eq!(cli.workspace.as_deref(), Some("9001"));
         assert!(cli.pretty);
+    }
+
+    #[test]
+    fn from_template_requires_exactly_one_location() {
+        expect_parse_error(&[
+            "clickup-cli",
+            "list",
+            "from-template",
+            "--folder",
+            "457",
+            "--space",
+            "790",
+            "tmpl_1",
+            "--name",
+            "Sprint 12",
+        ]);
+    }
+
+    #[test]
+    fn from_template_requires_at_least_one_location() {
+        expect_parse_error(&[
+            "clickup-cli",
+            "list",
+            "from-template",
+            "tmpl_1",
+            "--name",
+            "Sprint 12",
+        ]);
+    }
+
+    #[test]
+    fn from_template_with_exactly_one_location_parses() {
+        Cli::try_parse_from([
+            "clickup-cli",
+            "list",
+            "from-template",
+            "--folder",
+            "457",
+            "tmpl_1",
+            "--name",
+            "Sprint 12",
+        ])
+        .expect("exactly one of --folder/--space should parse");
     }
 }
