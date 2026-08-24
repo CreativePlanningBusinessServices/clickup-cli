@@ -2,10 +2,12 @@ pub mod account;
 pub mod checklist;
 pub mod comment;
 pub mod config_cmd;
+pub mod field;
 pub mod folder;
 pub mod list;
 pub mod raw;
 pub mod space;
+pub mod tag;
 pub mod task;
 pub mod workspace;
 
@@ -149,22 +151,38 @@ pub fn custom_id_query(
     ])
 }
 
-/// Reads a `--data`-style argument: inline JSON, `@file` to read a file, or `-` for stdin.
-pub fn read_data_arg(data: &str) -> Result<Value, CliError> {
-    let text = if data == "-" {
+/// Resolves a `--data`-style argument to its raw text: inline text, `@file` to read a file, or
+/// `-` for stdin. Shared by `read_data_arg` (which requires the result to be valid JSON) and
+/// `read_value_arg` (which falls back to treating invalid JSON as a plain string).
+fn resolve_data_text(data: &str) -> Result<String, CliError> {
+    if data == "-" {
         let mut buffer = String::new();
         std::io::stdin()
             .read_to_string(&mut buffer)
             .map_err(|io_error| CliError::Usage(format!("cannot read stdin: {io_error}")))?;
-        buffer
+        Ok(buffer)
     } else if let Some(file_path) = data.strip_prefix('@') {
         std::fs::read_to_string(file_path)
-            .map_err(|io_error| CliError::Usage(format!("cannot read {file_path}: {io_error}")))?
+            .map_err(|io_error| CliError::Usage(format!("cannot read {file_path}: {io_error}")))
     } else {
-        data.to_string()
-    };
+        Ok(data.to_string())
+    }
+}
+
+/// Reads a `--data`-style argument: inline JSON, `@file` to read a file, or `-` for stdin.
+pub fn read_data_arg(data: &str) -> Result<Value, CliError> {
+    let text = resolve_data_text(data)?;
     serde_json::from_str(&text)
         .map_err(|parse_error| CliError::Usage(format!("data is not valid JSON: {parse_error}")))
+}
+
+/// Reads a `--value`-style argument the same way `--data` is read (inline text, `@file`, or
+/// `-` for stdin), but text that fails to parse as JSON is treated as a plain string instead of
+/// erroring — so agents can pass a bare word like `urgent` without needing to double-quote it
+/// as `'"urgent"'`. Used by `field set`'s `--value`.
+pub fn read_value_arg(value: &str) -> Result<Value, CliError> {
+    let text = resolve_data_text(value)?;
+    Ok(serde_json::from_str(&text).unwrap_or(Value::String(text)))
 }
 
 /// Parses an optional `--data` flag into a JSON body, defaulting to an empty object when the
@@ -252,6 +270,34 @@ mod tests {
     fn rejects_missing_file() {
         let parse_result = read_data_arg("@/nonexistent");
         assert!(matches!(parse_result, Err(CliError::Usage(_))));
+    }
+
+    #[test]
+    fn read_value_arg_treats_a_bare_word_as_a_plain_string() {
+        let value = read_value_arg("urgent").unwrap();
+        assert_eq!(value, Value::String("urgent".to_string()));
+    }
+
+    #[test]
+    fn read_value_arg_parses_valid_json() {
+        assert_eq!(
+            read_value_arg(r#"{"add":["uuid1"]}"#).unwrap(),
+            serde_json::json!({"add": ["uuid1"]})
+        );
+        assert_eq!(
+            read_value_arg(r#""http://example.com""#).unwrap(),
+            Value::String("http://example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn read_value_arg_reads_from_file() {
+        let mut temp_file = tempfile::NamedTempFile::new().unwrap();
+        write!(temp_file, "urgent").unwrap();
+        let file_arg = format!("@{}", temp_file.path().display());
+
+        let value = read_value_arg(&file_arg).unwrap();
+        assert_eq!(value, Value::String("urgent".to_string()));
     }
 
     #[test]

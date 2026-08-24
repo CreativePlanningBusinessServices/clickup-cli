@@ -7,7 +7,7 @@ use serde_json::Value;
 use crate::client::CuClient;
 use crate::commands;
 use crate::commands::{
-    account, checklist, comment, config_cmd, folder, list, raw, space, task, workspace,
+    account, checklist, comment, config_cmd, field, folder, list, raw, space, tag, task, workspace,
 };
 use crate::context::{DEFAULT_BASE, context_for};
 use crate::error::CliError;
@@ -100,6 +100,16 @@ pub enum Command {
     Checklist {
         #[command(subcommand)]
         action: ChecklistAction,
+    },
+    /// Custom fields, scoped to a list/folder/space/workspace, and per-task field values
+    Field {
+        #[command(subcommand)]
+        action: FieldAction,
+    },
+    /// Tags defined on a space (task tagging lives under `task tag`)
+    Tag {
+        #[command(subcommand)]
+        action: TagAction,
     },
 }
 
@@ -759,6 +769,80 @@ pub enum ChecklistItemAction {
     },
 }
 
+#[derive(Subcommand)]
+pub enum FieldAction {
+    /// List custom fields on a list, folder, space, or (with none of those given) the current
+    /// workspace
+    #[command(
+        after_help = "Examples:\n  clickup-cli field list --list 124\n  clickup-cli field list --workspace 9001\n  clickup-cli field list\n\nGive at most one of --list/--folder/--space; with none given, lists workspace-wide fields for --workspace (global flag) or the account's default workspace.",
+        group(ArgGroup::new("field_list_location").args(["list", "folder", "space"]).multiple(false))
+    )]
+    List {
+        #[arg(long)]
+        list: Option<String>,
+        #[arg(long)]
+        folder: Option<String>,
+        #[arg(long)]
+        space: Option<String>,
+    },
+    /// Set a custom field's value on a task
+    #[command(
+        after_help = "Examples:\n  clickup-cli field set 868k5a5wa FIELD_UUID --value '\"http://example.com\"'\n  clickup-cli field set 868k5a5wa FIELD_UUID --value urgent\n  clickup-cli field set 868k5a5wa FIELD_UUID --value '{\"add\":[\"uuid1\"]}'\n\n--value accepts JSON, or a bare word treated as a plain string (no need to double-quote \"urgent\")."
+    )]
+    Set {
+        task_id: String,
+        field_id: String,
+        #[arg(long)]
+        value: String,
+        /// value_options, e.g. {"time":true} for date fields — inline JSON, @file, or -
+        #[arg(long)]
+        options: Option<String>,
+        #[arg(long = "custom-id")]
+        custom_id: bool,
+    },
+    /// Remove a custom field's value from a task
+    #[command(after_help = "Example: clickup-cli field remove 868k5a5wa FIELD_UUID")]
+    Remove {
+        task_id: String,
+        field_id: String,
+        #[arg(long = "custom-id")]
+        custom_id: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum TagAction {
+    /// List tags defined in a space
+    #[command(after_help = "Example: clickup-cli tag list 790")]
+    List { space_id: String },
+    /// Create a tag in a space
+    #[command(
+        after_help = "Example: clickup-cli tag create 790 --name urgent --fg '#ffffff' --bg '#ff0000'"
+    )]
+    Create {
+        space_id: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        fg: Option<String>,
+        #[arg(long)]
+        bg: Option<String>,
+    },
+    /// Update a tag in a space
+    #[command(
+        after_help = "Example: clickup-cli tag update 790 \"high priority\" --data '{\"name\":\"blocked\",\"tag_fg\":\"#ffffff\",\"tag_bg\":\"#ff0000\"}'"
+    )]
+    Update {
+        space_id: String,
+        tag_name: String,
+        #[arg(long)]
+        data: Option<String>,
+    },
+    /// Delete a tag from a space
+    #[command(after_help = "Example: clickup-cli tag delete 790 urgent")]
+    Delete { space_id: String, tag_name: String },
+}
+
 pub async fn cli_main() -> i32 {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -832,6 +916,8 @@ async fn dispatch(cli: &Cli) -> Result<Value, CliError> {
         Command::Task { action } => dispatch_task(cli, action).await,
         Command::Comment { action } => dispatch_comment(cli, action).await,
         Command::Checklist { action } => dispatch_checklist(cli, action).await,
+        Command::Field { action } => dispatch_field(cli, action).await,
+        Command::Tag { action } => dispatch_tag(cli, action).await,
     }
 }
 
@@ -1286,6 +1372,81 @@ async fn dispatch_checklist_item(
     }
 }
 
+async fn dispatch_field(cli: &Cli, action: &FieldAction) -> Result<Value, CliError> {
+    let context = context_for(cli.account.as_deref(), cli.workspace.as_deref())?;
+    match action {
+        FieldAction::List {
+            list,
+            folder,
+            space,
+        } => {
+            let location =
+                field::location_from(list.as_deref(), folder.as_deref(), space.as_deref());
+            field::list(&context.client, &location).await
+        }
+        FieldAction::Set {
+            task_id,
+            field_id,
+            value,
+            options,
+            custom_id,
+        } => {
+            let value = commands::read_value_arg(value)?;
+            let options = options
+                .as_deref()
+                .map(commands::read_data_arg)
+                .transpose()?;
+            field::set(
+                &context.client,
+                task_id,
+                field_id,
+                *custom_id,
+                value,
+                options,
+            )
+            .await
+        }
+        FieldAction::Remove {
+            task_id,
+            field_id,
+            custom_id,
+        } => field::remove(&context.client, task_id, field_id, *custom_id).await,
+    }
+}
+
+async fn dispatch_tag(cli: &Cli, action: &TagAction) -> Result<Value, CliError> {
+    let context = context_for(cli.account.as_deref(), cli.workspace.as_deref())?;
+    match action {
+        TagAction::List { space_id } => tag::list(&context.client, space_id).await,
+        TagAction::Create {
+            space_id,
+            name,
+            fg,
+            bg,
+        } => {
+            tag::create(
+                &context.client,
+                space_id,
+                name,
+                fg.as_deref(),
+                bg.as_deref(),
+            )
+            .await
+        }
+        TagAction::Update {
+            space_id,
+            tag_name,
+            data,
+        } => {
+            let body = commands::parse_data_flag(data.as_deref())?;
+            tag::update(&context.client, space_id, tag_name, body).await
+        }
+        TagAction::Delete { space_id, tag_name } => {
+            tag::delete(&context.client, space_id, tag_name).await
+        }
+    }
+}
+
 fn dispatch_config(action: &ConfigAction) -> Result<Value, CliError> {
     let config_path = crate::config::default_config_path()?;
     match action {
@@ -1563,5 +1724,65 @@ mod tests {
             "Sprint 12",
         ])
         .expect("exactly one of --folder/--space should parse");
+    }
+
+    #[test]
+    fn field_list_rejects_more_than_one_location() {
+        expect_parse_error(&[
+            "clickup-cli",
+            "field",
+            "list",
+            "--list",
+            "124",
+            "--folder",
+            "457",
+        ]);
+    }
+
+    #[test]
+    fn field_list_with_no_location_parses_as_workspace_scoped() {
+        Cli::try_parse_from(["clickup-cli", "field", "list"])
+            .expect("no location flags should parse (falls back to workspace scope)");
+    }
+
+    #[test]
+    fn field_list_honors_the_global_workspace_override_after_the_subcommand() {
+        // The global `--workspace` flag isn't part of `field list`'s ArgGroup (it can't be —
+        // clap forbids a local arg from sharing a long name with a propagated global one), so
+        // this only exercises that passing it alongside `field list` still parses; the
+        // workspace override itself is applied later via `context_for`.
+        Cli::try_parse_from(["clickup-cli", "field", "list", "--workspace", "9001"])
+            .expect("global --workspace override should parse alongside field list");
+    }
+
+    #[test]
+    fn field_set_parses_bare_word_value() {
+        Cli::try_parse_from([
+            "clickup-cli",
+            "field",
+            "set",
+            "868k5a5wa",
+            "FIELD_UUID",
+            "--value",
+            "urgent",
+        ])
+        .expect("field set should parse");
+    }
+
+    #[test]
+    fn tag_create_parses() {
+        Cli::try_parse_from([
+            "clickup-cli",
+            "tag",
+            "create",
+            "790",
+            "--name",
+            "urgent",
+            "--fg",
+            "#ffffff",
+            "--bg",
+            "#ff0000",
+        ])
+        .expect("tag create should parse");
     }
 }
