@@ -1,4 +1,5 @@
 pub mod account;
+pub mod config_cmd;
 
 use std::io::Read;
 

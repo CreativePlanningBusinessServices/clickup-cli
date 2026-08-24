@@ -3,7 +3,7 @@ use std::io::IsTerminal;
 use clap::{Parser, Subcommand};
 use serde_json::Value;
 
-use crate::commands::account;
+use crate::commands::{account, config_cmd};
 use crate::context::{DEFAULT_BASE, context_for};
 use crate::error::CliError;
 use crate::output;
@@ -38,6 +38,11 @@ pub enum Command {
         #[command(subcommand)]
         action: AccountAction,
     },
+    /// Get or set configuration values
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -64,6 +69,21 @@ pub enum AccountAction {
     /// Verify the stored token by calling GET /api/v2/user
     #[command(after_help = "Example: clickup-cli account test --account work")]
     Test,
+}
+
+#[derive(Subcommand)]
+pub enum ConfigAction {
+    /// Get one or all configuration values
+    #[command(
+        after_help = "Examples:\n  clickup-cli config get\n  clickup-cli config get default_account"
+    )]
+    Get {
+        /// Configuration key to retrieve; omit to get all values
+        key: Option<String>,
+    },
+    /// Set a configuration value
+    #[command(after_help = "Example: clickup-cli config set default_account work")]
+    Set { key: String, value: String },
 }
 
 pub async fn cli_main() -> i32 {
@@ -107,6 +127,15 @@ fn handle_clap_error(error: clap::Error) -> i32 {
 async fn dispatch(cli: &Cli) -> Result<Value, CliError> {
     match &cli.command {
         Command::Account { action } => dispatch_account(cli, action).await,
+        Command::Config { action } => dispatch_config(action),
+    }
+}
+
+fn dispatch_config(action: &ConfigAction) -> Result<Value, CliError> {
+    let config_path = crate::config::default_config_path()?;
+    match action {
+        ConfigAction::Get { key } => config_cmd::get(&config_path, key.as_deref()),
+        ConfigAction::Set { key, value } => config_cmd::set(&config_path, key, value),
     }
 }
 
