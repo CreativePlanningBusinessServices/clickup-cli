@@ -1,0 +1,856 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>clickup-cli — Implementation Plan (2026-08-24)</title>
+<style>
+  :root { --ink:#1a2233; --muted:#5b6575; --accent:#4466ff; --accent-soft:#e9edff;
+          --border:#d9dee7; --code-bg:#f4f6f9; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+         color: var(--ink); line-height: 1.55; max-width: 62rem; margin: 0 auto;
+         padding: 2.5rem 1.5rem 5rem; background: #fff; }
+  h1 { font-size: 1.9rem; margin-bottom: 0.25rem; }
+  h2 { font-size: 1.35rem; margin-top: 2.5rem; border-bottom: 2px solid var(--accent-soft); padding-bottom: 0.3rem; }
+  h3 { font-size: 1.1rem; margin-top: 2rem; border-bottom: 1px solid var(--border); padding-bottom: 0.25rem; }
+  code, pre { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.86em; }
+  code { background: var(--code-bg); padding: 0.12em 0.35em; border-radius: 4px; }
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px;
+        padding: 0.9rem 1.1rem; overflow-x: auto; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.93rem; }
+  th, td { border: 1px solid var(--border); padding: 0.45rem 0.65rem; text-align: left; vertical-align: top; }
+  th { background: var(--accent-soft); }
+  blockquote { border-left: 4px solid var(--accent); background: var(--accent-soft);
+               margin: 1rem 0; padding: 0.6rem 1rem; border-radius: 0 8px 8px 0; }
+  ul { padding-left: 1.3rem; }
+  li { margin: 0.25rem 0; }
+  input[type="checkbox"] { margin-right: 0.4rem; }
+  li:has(> input[type="checkbox"]) { list-style: none; margin-left: -1.1rem; }
+  .decision-panel { background: var(--accent-soft); border: 1px solid var(--accent);
+                    border-radius: 10px; padding: 1.1rem 1.3rem; margin: 1.6rem 0; }
+  .decision-panel h3 { margin-top: 0; border: none; }
+  .btn { display: inline-block; margin: 0.35rem 0.5rem 0.35rem 0; padding: 0.55rem 1.1rem;
+         border-radius: 8px; text-decoration: none; font-weight: 600; border: 1px solid var(--accent); }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-secondary { background: #fff; color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="decision-panel">
+  <h3>Decision: how should we execute this plan?</h3>
+  <p>22 tasks, each with its own test cycle and commit. Buttons repeat at the bottom.</p>
+  <a class="btn btn-primary" href="http://127.0.0.1:8137/pick?c=subagent&amp;l=Subagent-driven" target="_blank">Subagent-driven (recommended) — fresh subagent per task, review between tasks</a>
+  <a class="btn btn-secondary" href="http://127.0.0.1:8137/pick?c=inline&amp;l=Inline" target="_blank">Inline — execute in this session with checkpoints</a>
+  <a class="btn btn-secondary" href="http://127.0.0.1:8137/pick?c=changes&amp;l=Request+changes" target="_blank">I have changes — I'll describe them in chat</a>
+</div>
+<h1>clickup-cli Implementation Plan</h1>
+<blockquote>
+<p><strong>For agentic workers:</strong> REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (<code>- [ ]</code>) syntax for tracking.</p>
+</blockquote>
+<p><strong>Goal:</strong> Build <code>clickup-cli</code>, a single-binary Rust CLI for AI agents wrapping the ClickUp public API (v2 + the v3 Docs/Chat/attachments/move endpoints), modeled on <code>intacct-cli</code>.</p>
+<p><strong>Architecture:</strong> Noun-verb command families (<code>task create</code>, <code>time start</code>, …) covering every mainstream API resource, with <code>raw</code> as the escape hatch. All logic lives in the library crate; every command handler takes <code>&amp;CuClient</code>, returns <code>Result&lt;serde_json::Value, CliError&gt;</code>, and never prints; a single dispatcher owns stdout/stderr and exit codes. Personal-token auth only — no OAuth flow, no token refresh, no loopback listener.</p>
+<p><strong>Tech Stack:</strong> Rust edition 2024, clap 4 (derive), tokio, reqwest (rustls, json, multipart), serde/serde_json, thiserror, keyring 3, directories, toml, url, rpassword, self_update. Dev: wiremock, tempfile, assert_cmd, predicates.</p>
+<p><strong>Spec:</strong> the approved design at <code>docs/superpowers/specs/2026-08-24-clickup-cli-design.html</code>. Sibling repos <code>~/projects/creativeplanning/intacct-cli</code> and <code>~/projects/creativeplanning/netsuite-cli</code> are on disk — when a task says "port", READ the named file and adapt it. Two deliberate deviations from the spec's module list: the minimal <code>auth.rs</code> is folded into <code>context.rs</code> (a static token needs no provider abstraction; tests inject the token via the <code>CuClient</code> constructor), and <code>account.rs</code>'s pure helpers (workspace selection) live in <code>commands/account.rs</code> — there is no URL building to share without OAuth.</p>
+<h2>Global Constraints</h2>
+<ul>
+<li>Repo: <code>/Users/jonlamb/projects/creativeplanning/clickup-cli</code>, branch <code>feature/868k5a5wa-clickup-cli</code>. Crate <code>clickup-cli</code>, lib name <code>clickup_cli</code>, version <code>0.1.0</code>, edition <code>2024</code>.</li>
+<li>stdout carries <strong>exactly one JSON value</strong> per invocation (compact; <code>--pretty</code> indents). Everything else — errors (JSON), prompts, warnings — goes to stderr. Only <code>--help</code>/<code>--version</code> put human text on stdout (exit 0).</li>
+<li>Exit codes: 0 success · 1 api · 2 usage · 3 auth · 4 network. Error JSON: <code>{"kind","message",...}</code>; api adds <code>status</code> and (when present) <code>ecode</code>.</li>
+<li>API base: <code>https://api.clickup.com</code>, overridable via env <code>CLICKUP_API_BASE</code> (tests/mocks). Commands name full paths (<code>/api/v2/…</code>, <code>/api/v3/…</code>).</li>
+<li>Secrets: OS keyring only (service <code>clickup-cli</code>), never in the TOML config, never CLI flags. Token input: env <code>CLICKUP_CLI_TOKEN</code> or hidden prompt.</li>
+<li>Success bodies pass through as-is; synthesized shapes only where the API returns nothing (<code>{"deleted":true,…}</code>, account/skill/update results, merged pagination envelopes <code>{"items","count","hasMore"}</code>).</li>
+<li>Naming: descriptive names, never single letters. Comments: only for the genuinely non-obvious, explaining <em>why</em> at the decision site. Functions ordered top-down.</li>
+<li>Every task ends with <code>cargo fmt</code> clean, <code>cargo clippy --all-targets -- -D warnings</code> clean, <code>cargo test</code> green, then a commit. Commit messages end with <code>Co-Authored-By: Claude Fable 5 &lt;noreply@anthropic.com&gt;</code>.</li>
+<li>clap: <code>color = Never</code>, <code>propagate_version = true</code>, <code>after_help</code> examples on every leaf subcommand, kebab-case flags, <code>ValueEnum</code> for closed sets.</li>
+<li>All integration tests call library functions directly against a <code>wiremock::MockServer</code> (no real network, no real keychain — <code>MemoryStore</code> only).</li>
+</ul>
+<h2>ClickUp API conventions (every task consumes these)</h2>
+<p>Verified 2026-08-24 against ClickUp's OpenAPI specs (v2 JSON + v3 YAML) and doc pages. The full endpoint inventory produced during planning is the authority for paths/params quoted in tasks.</p>
+<ul>
+<li><strong>Auth header:</strong> personal tokens are sent RAW — <code>Authorization: pk_…</code> with <strong>no <code>Bearer</code> prefix</strong>. Tokens never expire; a 401/OAUTH_* error means the token is bad, not stale.</li>
+<li><strong>Path shapes:</strong> v2 is flat (<code>/api/v2/task/{id}</code>, <code>/api/v2/team/{team_id}/space</code>); v3 nests under <code>/api/v3/workspaces/{workspace_id}/…</code>. v2 "team" = Workspace; <code>team_id</code> == <code>workspace_id</code>.</li>
+<li><strong>Errors:</strong> canonical body <code>{"err": "...", "ECODE": "..."}</code>; some (guest/user) endpoints use <code>{"error": "...", "ECODE": "..."}</code> — parse BOTH keys. Message fallback: HTTP status text.</li>
+<li><strong>Pagination regimes:</strong> (a) page-based v2 tasks: <code>?page=N</code> 0-indexed, 100/page; <code>GET /list/{id}/task</code> and <code>GET /view/{id}/task</code> return <code>{tasks, last_page}</code>; <code>GET /team/{team_Id}/task</code> has NO <code>last_page</code> — stop on a page shorter than 100. (b) comments: newest-first 25/page; next page via <code>start</code> (=last comment's <code>date</code>) + <code>start_id</code> (=its <code>id</code>) together. (c) v3 cursor: <code>?cursor=&amp;limit=</code>, response carries <code>next_cursor</code>. Everything else returns the full set.</li>
+<li><strong>Custom task IDs:</strong> task-addressed endpoints accept <code>?custom_task_ids=true&amp;team_id={workspace_id}</code> so <code>{task_id}</code> can be <code>PROJ-123</code>; <code>team_id</code> is REQUIRED alongside <code>custom_task_ids=true</code>. CLI surface: a <code>--custom-id</code> flag on task-addressed verbs.</li>
+<li><strong>Dates/durations:</strong> epoch milliseconds. Task write bodies use <code>markdown_content</code> (not <code>markdown_description</code>); reads add markdown via <code>?include_markdown_description=true</code>. <code>UpdateTask</code> clears a description with <code>"description": " "</code> (single space).</li>
+<li><strong>Rate limits:</strong> 100 req/min (Free/Unlimited/Business) up to 10k (Enterprise); 429 with <code>X-RateLimit-Reset</code> (epoch seconds). Retry loop honors <code>Retry-After</code> when present, else backoff.</li>
+<li><strong>Attachments:</strong> v2 upload is multipart with file field named <code>attachment</code>; v3 entity attachments use entity_type <code>attachments</code> (a task) or <code>custom_fields</code> (a Files field).</li>
+</ul>
+<h2>File Map</h2>
+<table>
+<thead><tr><th>File</th><th>Responsibility</th><th>Task</th></tr></thead>
+<tbody>
+<tr><td><code>Cargo.toml</code>, <code>src/main.rs</code>, <code>src/lib.rs</code></td><td>deps · 4-line tokio shim · module declarations</td><td>1</td></tr>
+<tr><td><code>src/error.rs</code>, <code>src/output.rs</code></td><td><code>CliError</code>, exit codes, JSON envelope · <code>print_json</code>/<code>print_error</code></td><td>1</td></tr>
+<tr><td><code>src/config.rs</code></td><td>TOML config, alias resolution</td><td>2</td></tr>
+<tr><td><code>src/secrets.rs</code></td><td><code>SecretStore</code> trait, keyring + memory stores</td><td>3</td></tr>
+<tr><td><code>src/client.rs</code>, <code>tests/common/mod.rs</code></td><td><code>CuClient</code> retry/error core · test harness</td><td>4</td></tr>
+<tr><td><code>src/context.rs</code>, <code>src/cli.rs</code>, <code>src/commands/mod.rs</code>, <code>src/commands/account.rs</code></td><td>wiring seam · clap tree/dispatch · arg helpers · account verbs</td><td>5</td></tr>
+<tr><td><code>src/commands/config_cmd.rs</code></td><td>config get/set</td><td>6</td></tr>
+<tr><td><code>src/commands/raw.rs</code></td><td>escape hatch</td><td>7</td></tr>
+<tr><td><code>src/commands/workspace.rs</code>, <code>space.rs</code>, <code>folder.rs</code></td><td>workspace meta · space CRUD · folder CRUD/move/template</td><td>8</td></tr>
+<tr><td><code>src/commands/list.rs</code></td><td>list family</td><td>9</td></tr>
+<tr><td><code>src/commands/task.rs</code></td><td>task core CRUD + list/filter pagination + custom-id support</td><td>10</td></tr>
+<tr><td><code>src/commands/task.rs</code> (cont.)</td><td>move/merge/template/members/time-in-status, tag/dependency/link/attach</td><td>11</td></tr>
+<tr><td><code>src/commands/comment.rs</code></td><td>comments + threads + start/start_id pagination</td><td>12</td></tr>
+<tr><td><code>src/commands/checklist.rs</code></td><td>checklists + items</td><td>13</td></tr>
+<tr><td><code>src/commands/field.rs</code>, <code>tag.rs</code></td><td>custom fields · space tags</td><td>14</td></tr>
+<tr><td><code>src/commands/time.rs</code></td><td>time tracking</td><td>15</td></tr>
+<tr><td><code>src/commands/view.rs</code>, <code>goal.rs</code></td><td>views + view tasks · goals + key results</td><td>16</td></tr>
+<tr><td><code>src/commands/doc.rs</code></td><td>Docs v3 + cursor pagination reuse</td><td>17</td></tr>
+<tr><td><code>src/commands/chat.rs</code></td><td>Chat v3</td><td>18</td></tr>
+<tr><td><code>src/commands/user.rs</code>, <code>group.rs</code>, <code>webhook.rs</code>, <code>template.rs</code></td><td>users · groups · webhooks · template listings</td><td>19</td></tr>
+<tr><td><code>skills/clickup-cli/SKILL.md</code>, <code>src/commands/skill.rs</code></td><td>agent skill</td><td>20</td></tr>
+<tr><td><code>src/commands/update.rs</code></td><td>self-update</td><td>21</td></tr>
+<tr><td><code>.github/workflows/{ci,release}.yml</code>, <code>tests/live_smoke.rs</code>, <code>README.md</code>, <code>.gitattributes</code></td><td>infra</td><td>22</td></tr>
+</tbody></table>
+<hr>
+<h3>Task 1: Scaffold, error model, output</h3>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Modify: <code>Cargo.toml</code>, <code>src/main.rs</code></li>
+<li>Create: <code>src/lib.rs</code>, <code>src/error.rs</code>, <code>src/output.rs</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<ul>
+<li>Produces: <code>CliError</code> enum (<code>Api { status: u16, message: String, ecode: Option&lt;String&gt; }</code>, <code>Usage(String)</code>, <code>Auth(String)</code>, <code>Network(String)</code>) with <code>exit_code() -&gt; u8</code> and <code>to_json() -&gt; Value</code>; <code>output::print_json(&amp;Value, bool)</code>, <code>output::print_error(&amp;CliError)</code>. Every later task consumes these.</li>
+</ul>
+<ul>
+<li><input disabled="" type="checkbox"> <strong>Step 1: Update <code>Cargo.toml</code></strong> — keep the scaffold's dependency block but REMOVE <code>webbrowser</code> (no OAuth flow) and ADD:</li>
+</ul>
+<pre><code class="language-toml">self_update = { version = "0.42", default-features = false, features = ["rustls", "archive-zip", "compression-zip-deflate"] }
+</code></pre>
+<ul>
+<li><input disabled="" type="checkbox"> <strong>Step 2: Write <code>src/lib.rs</code> and <code>src/main.rs</code></strong></li>
+</ul>
+<p><code>src/lib.rs</code> (modules are added as later tasks create them; start with what exists):</p>
+<pre><code class="language-rust">pub mod error;
+pub mod output;
+</code></pre>
+<p><code>src/main.rs</code> stays a stub for now (the <code>cli</code> module arrives in Task 5):</p>
+<pre><code class="language-rust">fn main() {
+    // Replaced in Task 5 by: std::process::exit(clickup_cli::cli::cli_main().await)
+}
+</code></pre>
+<ul>
+<li><input disabled="" type="checkbox"> <strong>Step 3: Write failing unit tests inside <code>src/error.rs</code></strong> (create the file with ONLY the test module first):</li>
+</ul>
+<pre><code class="language-rust">use serde_json::{Value, json};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exit_codes_match_error_kinds() {
+        assert_eq!(CliError::Api { status: 400, message: "bad".into(), ecode: None }.exit_code(), 1);
+        assert_eq!(CliError::Usage("no account".into()).exit_code(), 2);
+        assert_eq!(CliError::Auth("token rejected".into()).exit_code(), 3);
+        assert_eq!(CliError::Network("timeout".into()).exit_code(), 4);
+    }
+
+    #[test]
+    fn api_error_serializes_full_envelope_with_ecode() {
+        let error = CliError::Api {
+            status: 401,
+            message: "Token invalid".into(),
+            ecode: Some("OAUTH_025".into()),
+        };
+        assert_eq!(
+            error.to_json(),
+            json!({"kind": "api", "status": 401, "message": "Token invalid", "ecode": "OAUTH_025"})
+        );
+    }
+
+    #[test]
+    fn api_error_omits_ecode_when_absent() {
+        let error = CliError::Api { status: 404, message: "not found".into(), ecode: None };
+        assert_eq!(error.to_json(), json!({"kind": "api", "status": 404, "message": "not found"}));
+    }
+
+    #[test]
+    fn auth_error_serializes_without_status() {
+        assert_eq!(
+            CliError::Auth("no token stored".into()).to_json(),
+            json!({"kind": "auth", "message": "no token stored"})
+        );
+    }
+}
+</code></pre>
+<ul>
+<li><input disabled="" type="checkbox"> <strong>Step 4: Run tests to verify they fail</strong> — <code>cargo test</code> → compile error, <code>CliError</code> not found.</li>
+<li><input disabled="" type="checkbox"> <strong>Step 5: Implement <code>CliError</code> above the test module</strong>:</li>
+</ul>
+<pre><code class="language-rust">#[derive(Debug, thiserror::Error)]
+pub enum CliError {
+    #[error("{message}")]
+    Api { status: u16, message: String, ecode: Option&lt;String&gt; },
+    #[error("{0}")]
+    Usage(String),
+    #[error("{0}")]
+    Auth(String),
+    #[error("{0}")]
+    Network(String),
+}
+
+impl CliError {
+    pub fn exit_code(&amp;self) -&gt; u8 {
+        match self {
+            CliError::Api { .. } =&gt; 1,
+            CliError::Usage(_) =&gt; 2,
+            CliError::Auth(_) =&gt; 3,
+            CliError::Network(_) =&gt; 4,
+        }
+    }
+
+    pub fn to_json(&amp;self) -&gt; Value {
+        match self {
+            CliError::Api { status, message, ecode } =&gt; {
+                let mut envelope = json!({"kind": "api", "status": status, "message": message});
+                if let Some(code) = ecode {
+                    envelope["ecode"] = json!(code);
+                }
+                envelope
+            }
+            CliError::Usage(message) =&gt; json!({"kind": "usage", "message": message}),
+            CliError::Auth(message) =&gt; json!({"kind": "auth", "message": message}),
+            CliError::Network(message) =&gt; json!({"kind": "network", "message": message}),
+        }
+    }
+}
+</code></pre>
+<ul>
+<li><input disabled="" type="checkbox"> <strong>Step 6: Write <code>src/output.rs</code></strong> — port <code>~/projects/creativeplanning/intacct-cli/src/output.rs</code> verbatim (17 lines: <code>print_json(value, pretty)</code> → <code>println!</code> compact or pretty; <code>print_error(error)</code> → <code>eprintln!</code> of <code>error.to_json()</code> compact).</li>
+<li><input disabled="" type="checkbox"> <strong>Step 7: Run tests to verify pass</strong> — <code>cargo test</code> → green. <code>cargo fmt</code>, <code>cargo clippy --all-targets -- -D warnings</code>.</li>
+<li><input disabled="" type="checkbox"> <strong>Step 8: Commit</strong> — <code>"feat: error model and JSON output contract"</code>.</li>
+</ul>
+<hr>
+<h3>Task 2: Config file</h3>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>src/config.rs</code>; add <code>pub mod config;</code> to <code>src/lib.rs</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<ul>
+<li>Produces:</li>
+</ul>
+<pre><code class="language-rust">#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Config {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_account: Option&lt;String&gt;,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub accounts: std::collections::BTreeMap&lt;String, AccountEntry&gt;,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AccountEntry {
+    pub workspace_id: String,
+}
+
+impl Config {
+    pub fn load(path: &amp;Path) -&gt; Result&lt;Config, CliError&gt;;      // missing file → Config::default()
+    pub fn save(&amp;self, path: &amp;Path) -&gt; Result&lt;(), CliError&gt;;   // creates parent dirs
+    pub fn resolve_alias(&amp;self, flag: Option&lt;&amp;str&gt;, env_alias: Option&lt;&amp;str&gt;) -&gt; Result&lt;String, CliError&gt;;
+}
+pub fn default_config_path() -&gt; Result&lt;PathBuf, CliError&gt;;      // ProjectDirs "com","CreativePlanning","clickup-cli"
+</code></pre>
+<ul>
+<li><code>resolve_alias</code> precedence: <code>--account</code> flag → env → <code>default_account</code> → <code>CliError::Usage("no account selected: pass --account, set CLICKUP_ACCOUNT, or run `clickup-cli account set-default`")</code>. An alias missing from <code>accounts</code> → <code>Usage("unknown account '&lt;alias&gt;' — run `clickup-cli account list`")</code>.</li>
+<li>Port <code>~/projects/creativeplanning/intacct-cli/src/config.rs</code>, dropping <code>cache_ttl_hours</code>, <code>user_id</code>/<code>entity_id</code>/<code>flow</code> (no metadata cache, no flows here) and renaming <code>company_id</code> → <code>workspace_id</code>.</li>
+</ul>
+<ul>
+<li><input disabled="" type="checkbox"> <strong>Step 1: Write failing unit tests</strong> in <code>src/config.rs</code> <code>#[cfg(test)]</code>: (a) <code>round_trips_through_toml</code> — save a Config with two accounts to a tempdir path, load it back, assert equality and that the TOML text contains <code>[accounts.prod]</code>; (b) <code>resolve_alias_prefers_flag_then_env_then_default</code> — three asserts; (c) <code>resolve_alias_without_any_selection_is_usage_error</code> and <code>resolve_alias_unknown_alias_is_usage_error</code> (assert message mentions <code>account list</code>); (d) <code>load_missing_file_returns_default</code>. (<code>tempfile</code> is a dev-dependency; unit tests may use it.)</li>
+<li><input disabled="" type="checkbox"> <strong>Step 2: Run to verify failure. Step 3: Implement. Step 4: Verify pass; fmt, clippy.</strong></li>
+<li><input disabled="" type="checkbox"> <strong>Step 5: Commit</strong> — <code>"feat: TOML config with alias resolution"</code>.</li>
+</ul>
+<hr>
+<h3>Task 3: Secret store</h3>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>src/secrets.rs</code>; add <code>pub mod secrets;</code> to <code>src/lib.rs</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<ul>
+<li>Produces:</li>
+</ul>
+<pre><code class="language-rust">pub const KEYRING_SERVICE: &amp;str = "clickup-cli";
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum AccountSecrets {
+    // The tag keeps a future OAuth variant migration-free.
+    Token { token: String },
+}
+
+pub trait SecretStore {
+    fn get(&amp;self, alias: &amp;str) -&gt; Result&lt;Option&lt;AccountSecrets&gt;, CliError&gt;;
+    fn set(&amp;self, alias: &amp;str, secrets: &amp;AccountSecrets) -&gt; Result&lt;(), CliError&gt;;
+    fn delete(&amp;self, alias: &amp;str) -&gt; Result&lt;(), CliError&gt;;   // absent entry is not an error
+}
+
+pub struct KeyringStore;                                       // real backend
+#[derive(Default)]
+pub struct MemoryStore { /* RefCell&lt;HashMap&lt;String, AccountSecrets&gt;&gt; */ }  // test double
+</code></pre>
+<ul>
+<li>Port <code>~/projects/creativeplanning/intacct-cli/src/secrets.rs</code>, dropping the <code>#token</code> cached-token entries entirely (personal tokens don't expire — there is nothing to cache). Keyring failures map to <code>CliError::Auth</code> with the OS message.</li>
+</ul>
+<ul>
+<li><input disabled="" type="checkbox"> <strong>Step 1: Write failing unit tests</strong>: (a) <code>account_secrets_serialize_with_kind_tag</code> — <code>serde_json::to_value</code> equals <code>json!({"kind":"token","token":"pk_123"})</code> and round-trips; (b) <code>memory_store_set_get_delete_round_trip</code>; (c) <code>memory_store_get_missing_alias_is_none</code> and <code>delete_missing_alias_is_ok</code>.</li>
+<li><input disabled="" type="checkbox"> <strong>Step 2: Run to verify failure. Step 3: Implement. Step 4: Verify pass; fmt, clippy.</strong></li>
+<li><input disabled="" type="checkbox"> <strong>Step 5: Commit</strong> — <code>"feat: keyring secret store with memory test double"</code>.</li>
+</ul>
+<hr>
+<h3>Task 4: HTTP client core (<code>CuClient</code>)</h3>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>src/client.rs</code>, <code>tests/common/mod.rs</code>, <code>tests/client.rs</code>; add <code>pub mod client;</code> to <code>src/lib.rs</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<ul>
+<li>Produces:</li>
+</ul>
+<pre><code class="language-rust">pub struct CuClient { /* http: reqwest::Client, base: String, token: String, workspace_id: Option&lt;String&gt; */ }
+pub struct CuResponse { pub status: u16, pub body: Option&lt;Value&gt; }
+
+impl CuClient {
+    pub fn new(base: String, token: String, workspace_id: Option&lt;String&gt;) -&gt; CuClient;
+    /// The configured workspace id, or Usage("no workspace id: pass --workspace or re-run `clickup-cli account add`").
+    pub fn workspace_id(&amp;self) -&gt; Result&lt;&amp;str, CliError&gt;;
+    pub async fn request(&amp;self, method: reqwest::Method, path: &amp;str,
+                         query: &amp;[(String, String)], body: Option&lt;Value&gt;)
+                         -&gt; Result&lt;CuResponse, CliError&gt;;
+    pub async fn request_with_headers(&amp;self, method: reqwest::Method, path: &amp;str,
+                         query: &amp;[(String, String)], headers: &amp;[(String, String)], body: Option&lt;Value&gt;)
+                         -&gt; Result&lt;CuResponse, CliError&gt;;
+    pub async fn request_multipart(&amp;self, path: &amp;str, query: &amp;[(String, String)],
+                         form: reqwest::multipart::Form) -&gt; Result&lt;CuResponse, CliError&gt;;
+}
+</code></pre>
+<p>Semantics (port the shape of <code>~/projects/creativeplanning/intacct-cli/src/client.rs</code>, simplified):</p>
+<ul>
+<li>Auth header: <code>Authorization: {token}</code> — RAW, no <code>Bearer</code> (personal-token rule; a comment states why). <code>Content-Type: application/json</code> only when a body is present.</li>
+<li>Retry loop (<code>MAX_ATTEMPTS = 4</code>, <code>BASE_BACKOFF_MILLIS = 500</code>): 429 → sleep <code>Retry-After</code> seconds when the header is present, else exponential backoff, retry; 5xx → backoff, retry; transport error → <code>CliError::Network</code> after retries. <strong>401 → immediate <code>CliError::Auth("ClickUp rejected the token (…message…) — check `clickup-cli account test` or re-run `account add`")</code>, no retry</strong> — tokens don't expire, so retrying cannot help. The request builder is a closure re-invoked per attempt (multipart forms are not reusable: build the form inside the closure).</li>
+<li>Error mapping <code>api_error(status, body_text)</code>: parse JSON; message = <code>err</code> key, else <code>error</code> key, else the raw body (truncated to 500 chars), else HTTP status canonical reason; <code>ecode = ECODE</code> key when present. Non-2xx (except 401) → <code>CliError::Api</code>.</li>
+<li>2xx with an empty body → <code>CuResponse { status, body: None }</code> (callers synthesize <code>{"status": N}</code> or a domain shape).</li>
+</ul>
+<p><code>tests/common/mod.rs</code> (the whole harness):</p>
+<pre><code class="language-rust">#![allow(dead_code)]
+use clickup_cli::client::CuClient;
+use wiremock::MockServer;
+
+pub const TEST_WORKSPACE: &amp;str = "9001";
+
+pub fn client_for(server: &amp;MockServer) -&gt; CuClient {
+    CuClient::new(server.uri(), "TEST_TOKEN".into(), Some(TEST_WORKSPACE.into()))
+}
+</code></pre>
+<ul>
+<li><input disabled="" type="checkbox"> <strong>Step 1: Write failing tests <code>tests/client.rs</code></strong>: (a) <code>sends_raw_token_header</code> — mock <code>GET /api/v2/user</code> requiring <code>header("Authorization", "TEST_TOKEN")</code>, assert body passes through; (b) <code>maps_err_and_ecode_body</code> — 404 with <code>{"err":"Team not found","ECODE":"TEAM_001"}</code> → <code>CliError::Api{status:404, ecode:Some("TEAM_001")}</code>; (c) <code>maps_error_key_variant</code> — 403 with <code>{"error":"not authorized","ECODE":"OAUTH_119"}</code> → message "not authorized"; (d) <code>retries_429_then_succeeds</code> — first mock 429 with <code>Retry-After: 0</code> (<code>.up_to_n_times(1)</code>, higher priority), second 200; assert success and <code>server.received_requests()</code> length 2; (e) <code>unauthorized_fails_fast_without_retry</code> — 401 mock <code>.expect(1)</code>, assert <code>CliError::Auth</code>; (f) <code>empty_body_yields_none</code> — 204 → <code>body: None</code>.</li>
+<li><input disabled="" type="checkbox"> <strong>Step 2: Run to verify failure. Step 3: Implement <code>src/client.rs</code>. Step 4: Verify pass; fmt, clippy.</strong></li>
+<li><input disabled="" type="checkbox"> <strong>Step 5: Commit</strong> — <code>"feat: HTTP client with retry and ClickUp error mapping"</code>.</li>
+</ul>
+<hr>
+<h3>Task 5: Context, CLI skeleton, account commands</h3>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>src/context.rs</code>, <code>src/cli.rs</code>, <code>src/commands/mod.rs</code>, <code>src/commands/account.rs</code>, <code>tests/account_commands.rs</code>, <code>tests/cli_smoke.rs</code></li>
+<li>Modify: <code>src/lib.rs</code> (add <code>cli</code>, <code>commands</code>, <code>context</code>), <code>src/main.rs</code> (the 4-line tokio shim)</li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<ul>
+<li>Consumes: <code>Config</code>, <code>SecretStore</code>, <code>CuClient</code>, <code>CliError</code>, <code>output</code>.</li>
+<li>Produces:</li>
+</ul>
+<pre><code class="language-rust">// context.rs — the one wiring seam every network command goes through
+pub struct AccountContext { pub alias: String, pub client: CuClient }
+pub fn context_for(account_flag: Option&lt;&amp;str&gt;, workspace_flag: Option&lt;&amp;str&gt;) -&gt; Result&lt;AccountContext, CliError&gt;;
+// inner, testable: context_from(config, account_flag, workspace_flag, env_alias, env_base, store)
+
+// cli.rs
+pub async fn cli_main() -&gt; i32;              // parse, dispatch, print, exit code
+fn handle_clap_error(error: clap::Error) -&gt; i32;  // fold parse errors into the usage envelope
+
+// commands/mod.rs — shared arg helpers (port from intacct-cli commands/mod.rs)
+pub fn read_data_arg(data: &amp;str) -&gt; Result&lt;Value, CliError&gt;;            // inline JSON | @file | - (stdin)
+pub fn parse_key_value_pairs(pairs: &amp;[String]) -&gt; Result&lt;Vec&lt;(String, String)&gt;, CliError&gt;;  // k=v
+
+// commands/account.rs — all take config_path/store injected for testability
+pub async fn add(config_path: &amp;Path, store: &amp;dyn SecretStore, base: &amp;str, alias: &amp;str,
+                 token: String, workspace_id_flag: Option&lt;String&gt;) -&gt; Result&lt;Value, CliError&gt;;
+pub fn list(config_path: &amp;Path) -&gt; Result&lt;Value, CliError&gt;;
+pub fn set_default(config_path: &amp;Path, alias: &amp;str) -&gt; Result&lt;Value, CliError&gt;;
+pub fn remove(config_path: &amp;Path, store: &amp;dyn SecretStore, alias: &amp;str) -&gt; Result&lt;Value, CliError&gt;;
+pub async fn test(client: &amp;CuClient, alias: &amp;str) -&gt; Result&lt;Value, CliError&gt;;
+</code></pre>
+<p>Semantics:</p>
+<ul>
+<li><strong>Root clap attrs:</strong> <code>name = "clickup-cli"</code>, <code>version</code>, <code>about</code>, <code>propagate_version = true</code>, <code>color = clap::ColorChoice::Never</code>. Globals: <code>--account &lt;alias&gt;</code>, <code>--workspace &lt;id&gt;</code>, <code>--pretty</code> (all <code>global = true</code>; usable before or after the subcommand — parse test).</li>
+<li><strong><code>cli_main</code></strong>: <code>Cli::try_parse()</code>; on error → <code>handle_clap_error</code> (port from <code>~/projects/creativeplanning/intacct-cli/src/cli.rs</code> line ~592: <code>DisplayHelp</code>/<code>DisplayVersion</code> print to stdout exit 0; everything else renders into <code>CliError::Usage</code> JSON on stderr, exit 2). On success → <code>dispatch(cli).await</code>; <code>Ok(value)</code> → <code>print_json(&amp;value, pretty)</code>, 0; <code>Err(e)</code> → <code>print_error</code>, <code>e.exit_code()</code>.</li>
+<li><strong><code>context_for</code></strong>: load config from <code>default_config_path()</code>, resolve alias (env <code>CLICKUP_ACCOUNT</code>), fetch <code>AccountSecrets::Token</code> from the store (missing → <code>Auth("no token stored for '&lt;alias&gt;' — run `clickup-cli account add &lt;alias&gt;`")</code>), base from env <code>CLICKUP_API_BASE</code> or <code>https://api.clickup.com</code>, workspace = flag → config entry. Build <code>CuClient</code>.</li>
+<li><strong><code>account add</code></strong>: token from (in order) the <code>token</code> argument the dispatcher resolved — env <code>CLICKUP_CLI_TOKEN</code>, else <code>rpassword</code> hidden prompt when stdin is a TTY, else <code>Usage("set CLICKUP_CLI_TOKEN or run interactively")</code> (resolution lives in the dispatcher so <code>add</code> stays testable). Validate via <code>GET /api/v2/user</code>; fetch <code>GET /api/v2/team</code>; pick workspace: <code>--workspace-id</code> flag if given (must be in the list), else the only workspace, else on a TTY a numbered stderr prompt, else <code>Usage("multiple workspaces — pass --workspace-id; available: &lt;id&gt;=&lt;name&gt;, …")</code>. Write ordering: <strong>config entry first, then keychain</strong> (a half-failure leaves a self-describing, re-runnable state — same invariant and comment as the siblings). First account becomes <code>default_account</code>. Returns <code>{"ok":true,"alias":…,"user":{"id","username"},"workspace":{"id","name"}}</code>.</li>
+<li><strong><code>account remove</code></strong>: config save first, then <code>store.delete</code>. <strong><code>account list</code></strong>: <code>{"count","defaultAccount","accounts":[{"alias","workspaceId"}]}</code> — never secret material. <strong><code>account test</code></strong>: <code>GET /api/v2/user</code> → <code>{"ok":true,"alias",…,"user":…}</code>.</li>
+</ul>
+<ul>
+<li><input disabled="" type="checkbox"> <strong>Step 1: Write failing tests</strong>. <code>tests/account_commands.rs</code> (with <code>mod common;</code>): (a) <code>add_validates_token_and_stores_workspace</code> — mock <code>GET /api/v2/user</code> (require <code>header("Authorization","pk_test")</code>) and <code>GET /api/v2/team</code> returning one team <code>{"teams":[{"id":"9001","name":"CP"}]}</code>; call <code>account::add</code> with a tempdir config path + <code>MemoryStore</code>; assert result JSON, config file contains the entry with <code>workspace_id = "9001"</code>, store holds the token; (b) <code>add_with_multiple_workspaces_requires_flag</code> — two teams, no flag, no TTY → <code>Usage</code> listing both ids; (c) <code>first_account_becomes_default</code>; (d) <code>add_with_failing_keychain_leaves_rerunnable_config</code> — local <code>FailingSecretStore</code> whose <code>set</code> errors; assert the config entry EXISTS after the failure (port this test's shape from <code>~/projects/creativeplanning/intacct-cli/tests/account_commands.rs</code>); (e) <code>list_never_contains_token_material</code> — serialized output must not contain <code>pk_</code>; (f) <code>remove_deletes_config_then_secrets</code>. <code>tests/cli_smoke.rs</code> (assert_cmd, <code>#[cfg(not(windows))]</code> with the Known-Folder comment from intacct-cli): <code>--help</code> exits 0 and contains the about line; unknown alias with <code>HOME</code>/<code>XDG_CONFIG_HOME</code> at a tempdir and <code>env_remove("CLICKUP_ACCOUNT")</code> → <code>.code(2)</code>, stderr contains <code>"kind":"usage"</code>. Unit tests in <code>cli.rs</code>: <code>Cli::try_parse_from</code> accepts globals before and after the subcommand.</li>
+<li><input disabled="" type="checkbox"> <strong>Step 2: Run to verify failure. Step 3: Implement</strong> <code>context.rs</code>, <code>cli.rs</code> (with <code>Command::Account { action: AccountAction }</code> + dispatch), <code>commands/mod.rs</code>, <code>commands/account.rs</code>; swap <code>src/main.rs</code> to the tokio shim. <code>after_help</code> examples: <code>clickup-cli account add work</code>, <code>clickup-cli account test --account work</code>.</li>
+<li><input disabled="" type="checkbox"> <strong>Step 4: Verify pass; fmt, clippy. Step 5: Commit</strong> — <code>"feat: CLI skeleton, context wiring, account commands"</code>.</li>
+</ul>
+<hr>
+<h3>Task 6: Config command</h3>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>src/commands/config_cmd.rs</code> (named to avoid colliding with <code>crate::config</code>); add module + <code>Command::Config { action: ConfigAction }</code> + dispatch</li>
+<li>Test: <code>tests/config_cmd.rs</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<pre><code class="language-rust">pub fn get(config_path: &amp;Path, key: Option&lt;&amp;str&gt;) -&gt; Result&lt;Value, CliError&gt;;   // whole config (no key) or one key
+pub fn set(config_path: &amp;Path, key: &amp;str, value: &amp;str) -&gt; Result&lt;Value, CliError&gt;;
+</code></pre>
+<ul>
+<li>Recognized key: <code>default_account</code> (validated against <code>accounts</code>). Unknown key → <code>Usage("unknown config key '&lt;key&gt;' — known keys: default_account")</code>. <code>get</code> with no key returns the whole config as JSON (never secrets — the config never holds any). Port the shape of <code>~/projects/creativeplanning/intacct-cli/src/commands/config_cmd.rs</code>.</li>
+<li><input disabled="" type="checkbox"> <strong>Step 1: failing tests</strong> — (a) <code>set_default_account_validates_membership</code> (unknown alias → Usage); (b) <code>get_single_key_and_whole_config</code>. <strong>Step 2: verify failure. Step 3: implement + wire CLI with after_help. Step 4: verify pass; fmt, clippy. Step 5: commit</strong> — <code>"feat: config get/set command"</code>.</li>
+</ul>
+<hr>
+<h3>Task 7: Raw escape hatch</h3>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>src/commands/raw.rs</code>; add module + <code>Command::Raw</code> + dispatch; add <code>parse_header_pairs</code> to <code>src/commands/mod.rs</code></li>
+<li>Test: <code>tests/raw_commands.rs</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<pre><code class="language-rust">pub async fn call(client: &amp;CuClient, method: reqwest::Method, path: &amp;str,
+                  query: &amp;[(String, String)], headers: &amp;[(String, String)], body: Option&lt;Value&gt;)
+                  -&gt; Result&lt;Value, CliError&gt;;   // body pass-through; empty body → {"status": N}
+</code></pre>
+<ul>
+<li>CLI: <code>clickup-cli raw &lt;METHOD&gt; &lt;path&gt; [--query k=v]... [--header 'Name: value']... [--data &lt;json|@file|-&gt;]</code> with <code>HttpMethodArg</code> ValueEnum (Get/Post/Put/Patch/Delete, <code>ignore_case</code>). Port <code>~/projects/creativeplanning/intacct-cli/src/commands/raw.rs</code> and its <code>parse_header_pairs</code>. after_help: <code>clickup-cli raw GET /api/v2/team/9001/guest/42</code> (the documented route to enterprise endpoints).</li>
+<li><input disabled="" type="checkbox"> <strong>Step 1: failing tests</strong> — (a) GET with <code>--query</code> pairs and a custom header reaches the mock, body passes through; (b) 204 → <code>{"status": 204}</code>. <strong>Steps 2–4: fail → implement + wire → pass; fmt, clippy. Step 5: commit</strong> — <code>"feat: raw escape-hatch command"</code>.</li>
+</ul>
+<hr>
+<h3>Task 8: Workspace, space, and folder commands</h3>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>src/commands/workspace.rs</code>, <code>src/commands/space.rs</code>, <code>src/commands/folder.rs</code>; add modules + <code>Command::Workspace/Space/Folder</code> + dispatch</li>
+<li>Test: <code>tests/workspace_commands.rs</code>, <code>tests/space_commands.rs</code>, <code>tests/folder_commands.rs</code></li>
+</ul>
+<p><strong>Interfaces</strong> (all <code>pub async</code>, all <code>Result&lt;Value, CliError&gt;</code>, all pass-through unless noted):</p>
+<pre><code class="language-rust">// workspace.rs — team-scoped verbs use client.workspace_id()
+pub async fn list(client) -&gt; …;                        // GET /api/v2/team
+pub async fn seats(client) / plan(client) / shared(client) / task_types(client) -&gt; …;
+// GET /api/v2/team/{ws}/seats | /plan | /shared | /custom_item
+
+// space.rs
+pub async fn list(client, archived: bool) -&gt; …;        // GET /api/v2/team/{ws}/space?archived=
+pub async fn get(client, space_id) / create(client, data: Value) / update(client, space_id, data)
+    / delete(client, space_id) -&gt; …;                   // v2 space endpoints; delete → {"deleted":true,"id":…}
+
+// folder.rs
+pub async fn list(client, space_id, archived: bool) -&gt; …;   // GET /api/v2/space/{id}/folder
+pub async fn get(client, folder_id, include_subfolders: bool) / create(client, space_id, data)
+    / update(client, folder_id, data) / delete(client, folder_id) -&gt; …;
+pub async fn move_folder(client, folder_id, data: Value) -&gt; …;  // PUT /api/v2/folder/{id}/position
+pub async fn from_template(client, space_id, template_id, data: Value) -&gt; …;
+    // POST /api/v2/space/{space_id}/folder_template/{template_id}
+</code></pre>
+<p>CLI shapes (the <code>--name</code>/<code>--data</code> rule, used by every create/update verb in this plan: start from <code>--data</code> (parsed via <code>read_data_arg</code>, default <code>{}</code>), then merge scalar convenience flags over it — <code>--name</code> sets <code>body["name"]</code>. Implement once in <code>commands/mod.rs</code> as <code>pub fn merge_flag(body: &amp;mut Value, key: &amp;str, value: Option&lt;…&gt;)</code>):</p>
+<pre><code class="language-text">clickup-cli workspace list | seats | plan | shared | task-types
+clickup-cli space list [--archived]
+clickup-cli space create --name NAME [--data J]     # CreateSpace also wants multiple_assignees/features → --data
+clickup-cli space update SPACE_ID --data J
+clickup-cli folder create SPACE_ID --name NAME [--data J]
+clickup-cli folder move FOLDER_ID --data '{"space_id": "123"}'
+clickup-cli folder from-template SPACE_ID TEMPLATE_ID --name NAME [--data J]
+</code></pre>
+<ul>
+<li><input disabled="" type="checkbox"> <strong>Step 1: failing tests</strong> — per family, wiremock tests asserting exact paths against <code>common::TEST_WORKSPACE</code>: (a) <code>workspace_seats_hits_team_scoped_path</code> (<code>path("/api/v2/team/9001/seats")</code>); (b) <code>space_list_passes_archived_flag</code> (<code>query_param("archived","true")</code>); (c) <code>space_create_merges_name_over_data</code> (<code>body_json</code> asserting name wins over a name inside <code>--data</code>); (d) <code>folder_get_passes_include_subfolders</code>; (e) <code>folder_delete_returns_synthesized_ack</code> (204 → <code>{"deleted":true,"id":"457"}</code>); (f) <code>folder_from_template_posts_to_template_path</code>.</li>
+<li><input disabled="" type="checkbox"> <strong>Steps 2–4: fail → implement + wire CLI (after_help on every verb) → pass; fmt, clippy. Step 5: commit</strong> — <code>"feat: workspace, space, and folder commands"</code>.</li>
+</ul>
+<hr>
+<h3>Task 9: List commands</h3>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>src/commands/list.rs</code>; add module + <code>Command::List { action: ListAction }</code> + dispatch</li>
+<li>Test: <code>tests/list_commands.rs</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<pre><code class="language-rust">pub async fn list(client, folder_id: Option&lt;&amp;str&gt;, space_id: Option&lt;&amp;str&gt;, archived: bool) -&gt; …;
+    // --folder → GET /api/v2/folder/{id}/list ; --space → GET /api/v2/space/{id}/list (folderless)
+pub async fn get(client, list_id) / create(client, folder_id: Option, space_id: Option, data)
+    / update(client, list_id, data) / delete(client, list_id) / members(client, list_id) -&gt; …;
+pub async fn from_template(client, folder_id: Option, space_id: Option, template_id, data) -&gt; …;
+    // POST /api/v2/folder/{id}/list_template/{tid}  |  POST /api/v2/space/{id}/list_template/{tid}
+pub async fn add_task(client, list_id, task_id) / remove_task(client, list_id, task_id) -&gt; …;
+    // POST|DELETE /api/v2/list/{list_id}/task/{task_id} → {"ok":true,…} on empty body
+</code></pre>
+<ul>
+<li><code>--folder</code>/<code>--space</code> are a required, mutually exclusive pair on <code>list</code>/<code>create</code>/<code>from-template</code> — enforce with a clap <code>ArgGroup</code> (<code>required = true, multiple = false</code>), not hand-rolled checks. <code>add-task</code> needs the Tasks-in-Multiple-Lists ClickApp; the API's error passes through as kind api (note goes in SKILL.md).</li>
+<li>CLI: <code>clickup-cli list list --folder 457 [--archived]</code> · <code>list create --space 790 --name "Sprint 12" [--data J]</code> · <code>list add-task 124 abc123</code> · <code>list members 124</code>.</li>
+<li><input disabled="" type="checkbox"> <strong>Step 1: failing tests</strong> — (a) <code>list_via_folder_and_via_space_hit_different_paths</code> (two mocks, <code>.expect(1)</code> each); (b) <code>create_folderless_posts_to_space_path</code>; (c) <code>add_task_posts_and_synthesizes_ok</code> (empty 200 body → <code>{"ok":true,"listId":"124","taskId":"abc123"}</code>); (d) <code>from_template_requires_exactly_one_location</code> is a clap-level unit test in <code>cli.rs</code> (<code>try_parse_from</code> with both flags fails).</li>
+<li><input disabled="" type="checkbox"> <strong>Steps 2–4: fail → implement + wire → pass; fmt, clippy. Step 5: commit</strong> — <code>"feat: list commands"</code>.</li>
+</ul>
+<hr>
+<h3>Task 10: Task core — CRUD, list, filter, pagination, custom IDs</h3>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>src/commands/task.rs</code>; add module + <code>Command::Task { action: TaskAction }</code> + dispatch; add pagination + custom-id helpers to <code>src/commands/mod.rs</code></li>
+<li>Test: <code>tests/task_commands.rs</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<pre><code class="language-rust">// commands/mod.rs — shared by task list/filter (here) and view tasks (Task 16)
+pub const MAX_PAGES: u32 = 1000;
+/// Page-based task pagination. Without fetch_all: one request (page defaults to 0), body passes through.
+/// With fetch_all: loop page=0.., merge body["tasks"]; stop when last_page == true, when a page is empty,
+/// or — for endpoints WITHOUT a last_page flag (filtered team tasks) — when a page has fewer than 100 items;
+/// MAX_PAGES truncation → hasMore: true. Merged envelope: {"items": […], "count": n, "hasMore": bool}.
+pub async fn merge_task_pages(client: &amp;CuClient, path: &amp;str, base_query: &amp;[(String, String)],
+                              page: Option&lt;u64&gt;, fetch_all: bool) -&gt; Result&lt;Value, CliError&gt;;
+/// --custom-id support: appends [("custom_task_ids","true"), ("team_id", workspace)] when enabled.
+pub fn custom_id_query(client: &amp;CuClient, custom_id: bool) -&gt; Result&lt;Vec&lt;(String, String)&gt;, CliError&gt;;
+
+// task.rs
+pub async fn create(client, list_id, data: Value) -&gt; …;             // POST /api/v2/list/{id}/task (data must carry name)
+pub async fn get(client, task_id, custom_id: bool, subtasks: bool, markdown: bool) -&gt; …;
+    // GET /api/v2/task/{id}?include_subtasks&amp;include_markdown_description + custom_id_query
+pub async fn update(client, task_id, custom_id: bool, data) -&gt; …;   // PUT /api/v2/task/{id}
+pub async fn delete(client, task_id, custom_id: bool) -&gt; …;         // DELETE → {"deleted":true,"id":…}
+pub struct TaskListArgs { pub archived: bool, pub include_closed: bool, pub subtasks: bool,
+    pub markdown: bool, pub statuses: Vec&lt;String&gt;, pub assignees: Vec&lt;String&gt;,
+    pub order_by: Option&lt;String&gt;, pub reverse: bool, pub extra_query: Vec&lt;String&gt; /* raw k=v */ }
+pub fn build_task_query(args: &amp;TaskListArgs) -&gt; Result&lt;Vec&lt;(String, String)&gt;, CliError&gt;;  // pure, unit-tested
+pub async fn list(client, list_id, args, page, fetch_all) -&gt; …;     // GET /api/v2/list/{id}/task (has last_page)
+pub async fn filter(client, args, page, fetch_all) -&gt; …;            // GET /api/v2/team/{ws}/task (NO last_page)
+</code></pre>
+<ul>
+<li>Repeatable flags map to ClickUp's array params: <code>--status s</code> → <code>statuses[]=s</code> (one query pair per value), <code>--assignee id</code> → <code>assignees[]=id</code>; <code>filter</code> additionally accepts repeatable <code>--space/--folder/--list</code> ids → <code>space_ids[]/project_ids[]/list_ids[]</code> (folders are "projects" in this legacy param name — comment it). The long tail (date windows, custom_fields JSON) rides on repeatable <code>--query k=v</code> passed through verbatim.</li>
+<li>CLI: <code>clickup-cli task create 124 --name "Fix login" [--data J]</code> (name merged over data as in Task 8) · <code>task get 868k5a5wa --subtasks --markdown</code> · <code>task get DEV-123 --custom-id</code> · <code>task list 124 --status "in progress" --all</code> · <code>task filter --assignee 75413867 --query due_date_lt=1735689600000 --all</code> · <code>task update 868k5a5wa --data '{"status":"done"}'</code>.</li>
+<li><input disabled="" type="checkbox"> <strong>Step 1: failing tests</strong> — (a) <code>get_with_custom_id_sends_team_id_pair</code> (<code>query_param("custom_task_ids","true")</code> + <code>query_param("team_id","9001")</code>); (b) <code>create_posts_to_list_path_with_merged_name</code>; (c) <code>list_all_merges_pages_until_last_page</code> — page 0 mock returns 100 stub tasks + <code>"last_page":false</code>, page 1 returns 1 task + <code>"last_page":true</code> (match with <code>query_param("page","0"/"1")</code>, <code>.expect(1)</code> each); assert <code>{"count":101,"hasMore":false}</code>; (d) <code>filter_all_stops_on_short_page_without_last_page_flag</code> — one mock page 0 with 3 tasks (&lt; 100), assert a single request and <code>hasMore:false</code>; (e) <code>filter_hits_team_scoped_path</code> (<code>path("/api/v2/team/9001/task")</code>); (f) unit tests for <code>build_task_query</code> (statuses fan out to repeated <code>statuses[]</code> pairs; bad <code>--query</code> without <code>=</code> → Usage); (g) <code>delete_returns_synthesized_ack</code>.</li>
+<li><input disabled="" type="checkbox"> <strong>Steps 2–4: fail → implement + wire → pass; fmt, clippy. Step 5: commit</strong> — <code>"feat: task CRUD, list/filter with pagination and custom IDs"</code>.</li>
+</ul>
+<hr>
+<h3>Task 11: Task extras — move, merge, template, members, time-in-status, tag/dependency/link/attach</h3>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Modify: <code>src/commands/task.rs</code>, <code>src/cli.rs</code> (nested subcommand enums under <code>TaskAction</code>); add <code>merge_cursor_pages</code> to <code>src/commands/mod.rs</code></li>
+<li>Test: <code>tests/task_special_ops.rs</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<pre><code class="language-rust">// commands/mod.rs — v3 cursor pagination, reused by doc (Task 17) and chat (Task 18)
+/// Without fetch_all: one request, pass-through. With fetch_all: follow next_cursor via ?cursor=,
+/// merging body[items_key]; stop when next_cursor is null/absent/empty; MAX_PAGES guard → hasMore:true.
+pub async fn merge_cursor_pages(client: &amp;CuClient, path: &amp;str, base_query: &amp;[(String, String)],
+                                items_key: &amp;str, fetch_all: bool) -&gt; Result&lt;Value, CliError&gt;;
+
+// task.rs additions
+pub async fn move_task(client, task_id, list_id) -&gt; …;   // PUT /api/v3/workspaces/{ws}/tasks/{task_id}/home_list/{list_id}
+pub async fn merge(client, target_task_id, source_task_ids: &amp;[String]) -&gt; …;  // POST /api/v2/task/{id}/merge {source_task_ids}
+pub async fn from_template(client, list_id, template_id, name: &amp;str) -&gt; …;    // POST /api/v2/list/{id}/taskTemplate/{tid} {name}
+pub async fn members(client, task_id) -&gt; …;              // GET /api/v2/task/{id}/member
+pub async fn time_in_status(client, task_ids: &amp;[String], custom_id: bool) -&gt; …;
+    // 1 id → GET /api/v2/task/{id}/time_in_status ; &gt;1 → GET /api/v2/task/bulk_time_in_status/task_ids?task_ids=…
+pub async fn tag_add(client, task_id, tag_name, custom_id) / tag_remove(…) -&gt; …;   // POST|DELETE /task/{id}/tag/{name}
+pub async fn dependency_add(client, task_id, depends_on: Option, dependency_of: Option, custom_id) -&gt; …;
+pub async fn dependency_remove(client, task_id, depends_on: Option, dependency_of: Option, custom_id) -&gt; …;
+    // POST body {depends_on|dependency_of} ; DELETE passes them as query params
+pub async fn link_add(client, task_id, links_to, custom_id) / link_remove(…) -&gt; …; // POST|DELETE /task/{id}/link/{links_to}
+pub async fn attach(client, task_id, file_path: &amp;Path, filename: Option&lt;String&gt;, custom_id) -&gt; …;
+    // POST /api/v2/task/{id}/attachment — multipart field "attachment"; read file, Usage error if unreadable
+pub async fn attachments(client, task_id, cursor: Option&lt;String&gt;, fetch_all: bool) -&gt; …;
+    // GET /api/v3/workspaces/{ws}/attachments/{task_id}/attachments (entity_type literal "attachments")
+</code></pre>
+<ul>
+<li>CLI: <code>task move 868k5a5wa 125</code> · <code>task merge TARGET --source id1 --source id2</code> · <code>task time-in-status id1 [id2 …]</code> · <code>task tag add 868k5a5wa urgent</code> · <code>task dependency add 868k5a5wa --depends-on other1</code> (clap ArgGroup: exactly one of <code>--depends-on</code>/<code>--dependency-of</code>) · <code>task link add 868k5a5wa other2</code> · <code>task attach 868k5a5wa ./report.pdf</code> · <code>task attachments 868k5a5wa --all</code>.</li>
+<li><input disabled="" type="checkbox"> <strong>Step 1: failing tests</strong> — (a) <code>move_hits_v3_home_list_path</code> (<code>path("/api/v3/workspaces/9001/tasks/abc/home_list/125")</code>); (b) <code>merge_posts_source_ids</code> (<code>body_json</code>); (c) <code>time_in_status_switches_to_bulk_for_multiple_ids</code> (two tests, single vs bulk path + <code>query_param("task_ids","a")</code> …); (d) <code>dependency_delete_passes_query_params</code>; (e) <code>attach_uploads_multipart_field_named_attachment</code> — write a temp file, mock <code>POST …/attachment</code>, assert the received request's content-type starts with <code>multipart/form-data</code> and body contains <code>name="attachment"</code> (via <code>server.received_requests()</code>); (f) <code>attachments_all_follows_next_cursor</code> — two mocks distinguished by <code>query_param("cursor","c2")</code> / <code>query_param_is_missing("cursor")</code>, assert merged count and that <code>merge_cursor_pages</code> stops on null cursor.</li>
+<li><input disabled="" type="checkbox"> <strong>Steps 2–4: fail → implement + wire → pass; fmt, clippy. Step 5: commit</strong> — <code>"feat: task move/merge/template/members/time-in-status, tags, dependencies, links, attachments"</code>.</li>
+</ul>
+<hr>
+<h3>Task 12: Comment commands</h3>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>src/commands/comment.rs</code>; add module + <code>Command::Comment</code> + dispatch</li>
+<li>Test: <code>tests/comment_commands.rs</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<pre><code class="language-rust">pub enum CommentLocation&lt;'a&gt; { Task(&amp;'a str), List(&amp;'a str), View(&amp;'a str) }  // --task | --list | --view (ArgGroup)
+pub async fn list(client, location, custom_id: bool, fetch_all: bool) -&gt; …;
+    // GET /api/v2/task/{id}/comment | /list/{id}/comment | /view/{id}/comment
+    // newest-first, 25/page. --all: after each page take the LAST comment's date+id as start/start_id;
+    // stop when a page is empty or has fewer than 25 items. Merged envelope {"items","count","hasMore"}.
+pub async fn create(client, location, custom_id: bool, data: Value) -&gt; …;
+    // POST to the same path; data must carry comment_text (merged from --text); ClickUp requires
+    // assignee on LIST comments and notify_all generally — API validates, CLI passes through.
+pub async fn update(client, comment_id, data) / delete(client, comment_id) -&gt; …;   // PUT|DELETE /api/v2/comment/{id}
+pub async fn replies(client, comment_id) -&gt; …;                    // GET /api/v2/comment/{id}/reply
+pub async fn reply(client, comment_id, data) -&gt; …;                // POST /api/v2/comment/{id}/reply
+</code></pre>
+<ul>
+<li>CLI: <code>comment list --task 868k5a5wa --all</code> · <code>comment create --task 868k5a5wa --text "Deployed." [--notify-all] [--data J]</code> (<code>--text</code> merges into <code>data["comment_text"]</code>, <code>--notify-all</code> into <code>notify_all</code>) · <code>comment update 456 --text "edited" [--resolved true|false]</code> · <code>comment reply 456 --text "thanks"</code>.</li>
+<li><input disabled="" type="checkbox"> <strong>Step 1: failing tests</strong> — (a) <code>list_all_pages_with_start_and_start_id</code> — page 1 mock (no <code>start</code> param) returns 25 comments, last one <code>{"id":"c25","date":"1712345"}</code>; page 2 mock requires <code>query_param("start","1712345")</code> AND <code>query_param("start_id","c25")</code>, returns 3 comments; assert <code>count == 28, hasMore == false</code>; (b) <code>create_merges_text_and_notify_flags</code> (<code>body_json</code>); (c) <code>view_location_hits_view_path</code>; (d) <code>update_and_delete_hit_comment_path</code> (delete 204 → <code>{"deleted":true,"id":…}</code>).</li>
+<li><input disabled="" type="checkbox"> <strong>Steps 2–4: fail → implement + wire → pass; fmt, clippy. Step 5: commit</strong> — <code>"feat: comment commands with start/start_id pagination"</code>.</li>
+</ul>
+<hr>
+<h3>Task 13: Checklist commands</h3>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>src/commands/checklist.rs</code>; add module + <code>Command::Checklist</code> (with nested <code>item</code> subcommand) + dispatch</li>
+<li>Test: <code>tests/checklist_commands.rs</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<pre><code class="language-rust">pub async fn create(client, task_id, custom_id: bool, name: &amp;str) -&gt; …;   // POST /api/v2/task/{id}/checklist {name}
+pub async fn update(client, checklist_id, data) -&gt; …;      // PUT /api/v2/checklist/{id}  {name?, position?}
+pub async fn delete(client, checklist_id) -&gt; …;            // DELETE → {"deleted":true,…}
+pub async fn item_add(client, checklist_id, data) -&gt; …;    // POST /api/v2/checklist/{id}/checklist_item {name?, assignee?}
+pub async fn item_update(client, checklist_id, item_id, data) -&gt; …;  // PUT …/checklist_item/{item_id}
+pub async fn item_remove(client, checklist_id, item_id) -&gt; …;        // DELETE
+</code></pre>
+<ul>
+<li>CLI: <code>checklist create 868k5a5wa --name "QA steps"</code> · <code>checklist item add CHECKLIST_ID --name "run tests" [--assignee 75413867]</code> · <code>checklist item update CHECKLIST_ID ITEM_ID --data '{"resolved":true}'</code>.</li>
+<li><input disabled="" type="checkbox"> <strong>Step 1: failing tests</strong> — (a) <code>create_posts_name_to_task_checklist_path</code>; (b) <code>item_update_hits_nested_item_path</code>; (c) <code>delete_synthesizes_ack</code>. <strong>Steps 2–4: fail → implement + wire → pass; fmt, clippy. Step 5: commit</strong> — <code>"feat: checklist commands"</code>.</li>
+</ul>
+<hr>
+<h3>Task 14: Custom field and space tag commands</h3>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>src/commands/field.rs</code>, <code>src/commands/tag.rs</code>; add modules + <code>Command::Field/Tag</code> + dispatch</li>
+<li>Test: <code>tests/field_commands.rs</code>, <code>tests/tag_commands.rs</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<pre><code class="language-rust">// field.rs
+pub enum FieldLocation&lt;'a&gt; { List(&amp;'a str), Folder(&amp;'a str), Space(&amp;'a str), Workspace }
+pub async fn list(client, location) -&gt; …;
+    // GET /api/v2/list/{id}/field | /folder/{id}/field | /space/{id}/field | /team/{ws}/field
+pub async fn set(client, task_id, field_id, custom_id: bool, value: Value, options: Option&lt;Value&gt;) -&gt; …;
+    // POST /api/v2/task/{task_id}/field/{field_id} — body {"value": value} (+ "value_options" when given).
+    // value comes from --value via read_data_arg; a bare word that fails JSON parsing is treated as a
+    // plain string (agents shouldn't need to double-quote "urgent").
+pub async fn remove(client, task_id, field_id, custom_id: bool) -&gt; …;  // DELETE → {"removed":true,…}
+
+// tag.rs (space tags; task tagging lives under `task tag`, Task 11)
+pub async fn list(client, space_id) -&gt; …;                     // GET /api/v2/space/{id}/tag
+pub async fn create(client, space_id, name, fg: Option, bg: Option) -&gt; …;
+    // POST — body {"tag": {"name": …, "tag_fg": …, "tag_bg": …}} (colors only when given)
+pub async fn update(client, space_id, tag_name, data) -&gt; …;   // PUT /api/v2/space/{id}/tag/{name} {"tag": …}
+pub async fn delete(client, space_id, tag_name) -&gt; …;         // DELETE → {"deleted":true,…}
+</code></pre>
+<ul>
+<li>CLI: <code>field list --list 124</code> · <code>field list --workspace</code> · <code>field set 868k5a5wa FIELD_UUID --value '"http://example.com"'</code> · <code>field set 868k5a5wa FIELD_UUID --value '{"add":["uuid1"]}'</code> · <code>tag create 790 --name urgent --fg '#ffffff' --bg '#ff0000'</code>.</li>
+<li><input disabled="" type="checkbox"> <strong>Step 1: failing tests</strong> — (a) <code>field_list_workspace_uses_team_path</code> (<code>path("/api/v2/team/9001/field")</code>); (b) <code>field_set_wraps_value</code> (<code>body_json(json!({"value":"hello"}))</code> from bare-word input); (c) <code>field_set_passes_object_values_through</code>; (d) <code>tag_create_nests_tag_object</code>; (e) <code>tag_update_hits_name_path</code> (URL-encode the tag name with <code>url::form_urlencoded</code> — tag names may contain spaces; test with <code>"high priority"</code>).</li>
+<li><input disabled="" type="checkbox"> <strong>Steps 2–4: fail → implement + wire → pass; fmt, clippy. Step 5: commit</strong> — <code>"feat: custom field and space tag commands"</code>.</li>
+</ul>
+<hr>
+<h3>Task 15: Time tracking commands</h3>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>src/commands/time.rs</code>; add module + <code>Command::Time</code> (nested <code>tag</code> subcommand) + dispatch</li>
+<li>Test: <code>tests/time_commands.rs</code></li>
+</ul>
+<p><strong>Interfaces</strong> (all team-scoped paths use <code>client.workspace_id()</code>):</p>
+<pre><code class="language-rust">pub struct TimeListArgs { pub start_date: Option&lt;i64&gt;, pub end_date: Option&lt;i64&gt;,
+    pub assignee: Option&lt;String&gt;, pub task_id: Option&lt;String&gt;, pub list_id: Option&lt;String&gt;,
+    pub space_id: Option&lt;String&gt;, pub folder_id: Option&lt;String&gt;, pub billable: Option&lt;bool&gt;,
+    pub include_task_tags: bool, pub include_location_names: bool }
+pub async fn list(client, args) -&gt; …;                 // GET /api/v2/team/{ws}/time_entries?…
+pub async fn get(client, timer_id) -&gt; …;              // GET  …/time_entries/{id}
+pub async fn create(client, data) -&gt; …;               // POST …/time_entries  (start+duration|end validated by API)
+pub async fn update(client, timer_id, data) -&gt; …;     // PUT  …/time_entries/{id}
+pub async fn delete(client, timer_id) -&gt; …;           // DELETE
+pub async fn history(client, timer_id) -&gt; …;          // GET  …/time_entries/{id}/history
+pub async fn current(client, assignee: Option) -&gt; …;  // GET  …/time_entries/current
+pub async fn start(client, data) -&gt; …;                // POST …/time_entries/start
+pub async fn stop(client) -&gt; …;                       // POST …/time_entries/stop
+pub async fn tags(client) -&gt; …;                       // GET  …/time_entries/tags
+pub async fn tag_add(client, entry_ids: &amp;[String], tags: &amp;[String]) -&gt; …;     // POST …/tags {time_entry_ids, tags}
+pub async fn tag_remove(client, entry_ids, tags) -&gt; …;                        // DELETE …/tags (with body)
+pub async fn tag_rename(client, name, new_name, fg, bg) -&gt; …;                 // PUT …/tags
+</code></pre>
+<ul>
+<li>CLI: <code>time list --start-date 1735689600000 --assignee 75413867</code> · <code>time create --data '{"start":1735689600000,"duration":3600000,"tid":"868k5a5wa"}'</code> · <code>time start --data '{"tid":"868k5a5wa","description":"pairing"}'</code> · <code>time stop</code> · <code>time current</code> · <code>time tag add --entry 123 --entry 456 --tag billing</code>. Convenience flags on <code>create</code>/<code>start</code>: <code>--task &lt;id&gt;</code> merges as <code>tid</code>, <code>--description</code>, <code>--billable</code>. Legacy per-task tracked-time endpoints stay on <code>raw</code> (documented in SKILL.md). A gotcha comment + SKILL note: negative <code>duration</code> in responses = timer currently running.</li>
+<li><input disabled="" type="checkbox"> <strong>Step 1: failing tests</strong> — (a) <code>list_passes_date_window_and_assignee</code> (<code>query_param</code> ×3 on <code>/api/v2/team/9001/time_entries</code>); (b) <code>create_merges_task_flag_as_tid</code>; (c) <code>stop_posts_to_stop_path</code>; (d) <code>tag_add_sends_ids_and_tags_body</code> (<code>body_json</code>); (e) <code>tag_remove_sends_delete_with_body</code> (assert via <code>received_requests</code> that the DELETE carried the JSON body).</li>
+<li><input disabled="" type="checkbox"> <strong>Steps 2–4: fail → implement + wire → pass; fmt, clippy. Step 5: commit</strong> — <code>"feat: time tracking commands"</code>.</li>
+</ul>
+<hr>
+<h3>Task 16: View and goal commands</h3>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>src/commands/view.rs</code>, <code>src/commands/goal.rs</code>; add modules + <code>Command::View/Goal</code> + dispatch</li>
+<li>Test: <code>tests/view_commands.rs</code>, <code>tests/goal_commands.rs</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<pre><code class="language-rust">// view.rs
+pub enum ViewLocation&lt;'a&gt; { Workspace, Space(&amp;'a str), Folder(&amp;'a str), List(&amp;'a str) }
+pub async fn list(client, location) -&gt; …;      // GET /api/v2/team/{ws}/view | /space/{id}/view | /folder/{id}/view | /list/{id}/view
+pub async fn create(client, location, data) -&gt; …;   // POST to the same four paths (body: full view definition via --data)
+pub async fn get(client, view_id) / update(client, view_id, data) / delete(client, view_id) -&gt; …;
+pub async fn tasks(client, view_id, page: Option&lt;u64&gt;, fetch_all: bool) -&gt; …;
+    // GET /api/v2/view/{id}/task?page=N — page is REQUIRED by the API (default to 0); has last_page →
+    // reuse merge_task_pages (Task 10)
+
+// goal.rs
+pub async fn list(client, include_completed: bool) -&gt; …;   // GET /api/v2/team/{ws}/goal
+pub async fn get(client, goal_id) / create(client, data) / update(client, goal_id, data) / delete(client, goal_id) -&gt; …;
+    // POST /api/v2/team/{ws}/goal ; GET|PUT|DELETE /api/v2/goal/{id}
+pub async fn key_result_add(client, goal_id, data) -&gt; …;        // POST /api/v2/goal/{id}/key_result
+pub async fn key_result_update(client, key_result_id, data) -&gt; …;  // PUT /api/v2/key_result/{id}
+pub async fn key_result_remove(client, key_result_id) -&gt; …;        // DELETE /api/v2/key_result/{id}
+</code></pre>
+<ul>
+<li>CLI: <code>view list --space 790</code> · <code>view tasks VIEW_ID --all</code> · <code>view create --list 124 --data @view.json</code> · <code>goal create --data '{"name":"Q3 targets","due_date":1756684800000,…}'</code> · <code>goal key-result add GOAL_ID --data J</code>.</li>
+<li><input disabled="" type="checkbox"> <strong>Step 1: failing tests</strong> — (a) <code>view_list_hits_all_four_location_paths</code> (four mocks, <code>.expect(1)</code> each); (b) <code>view_tasks_defaults_page_zero_and_merges_all</code> (reuses the Task 10 pagination shape: <code>query_param("page","0"/"1")</code>, <code>last_page</code>); (c) <code>goal_create_posts_to_team_path</code>; (d) <code>key_result_update_hits_key_result_path</code>.</li>
+<li><input disabled="" type="checkbox"> <strong>Steps 2–4: fail → implement + wire → pass; fmt, clippy. Step 5: commit</strong> — <code>"feat: view and goal commands"</code>.</li>
+</ul>
+<hr>
+<h3>Task 17: Doc commands (v3)</h3>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>src/commands/doc.rs</code>; add module + <code>Command::Doc</code> (nested <code>page</code> subcommand) + dispatch</li>
+<li>Test: <code>tests/doc_commands.rs</code></li>
+</ul>
+<p><strong>Interfaces</strong> (all paths <code>/api/v3/workspaces/{ws}/docs…</code>; consumes <code>merge_cursor_pages</code> from Task 11):</p>
+<pre><code class="language-rust">pub async fn search(client, query: &amp;[(String, String)], fetch_all: bool) -&gt; …;
+    // GET …/docs?parent_id&amp;parent_type&amp;creator&amp;deleted&amp;archived&amp;limit&amp;cursor — items_key "docs"
+pub async fn create(client, data) -&gt; …;                    // POST …/docs  {name, parent:{id,type}, visibility, create_page}
+pub async fn get(client, doc_id) -&gt; …;                     // GET …/docs/{id}
+pub async fn page_listing(client, doc_id, depth: Option&lt;i64&gt;) -&gt; …;   // GET …/docs/{id}/page_listing
+pub async fn pages(client, doc_id, depth: Option&lt;i64&gt;, format: Option&lt;&amp;str&gt;) -&gt; …;  // GET …/docs/{id}/pages
+pub async fn page_get(client, doc_id, page_id, format: Option&lt;&amp;str&gt;) -&gt; …;
+pub async fn page_create(client, doc_id, data) -&gt; …;       // POST …/docs/{id}/pages {parent_page_id, name, sub_title, content, content_format}
+pub async fn page_update(client, doc_id, page_id, data) -&gt; …;
+    // PUT …/pages/{page_id} {name, sub_title, content, content_edit_mode: replace|append|prepend, content_format}
+</code></pre>
+<ul>
+<li>CLI: <code>doc search [--parent-id ID --parent-type TYPE] [--all]</code> · <code>doc create --name "Runbook" --parent-id 790 --parent-type 4 [--data J]</code> (parent types: 4=Space 5=Folder 6=List 7=Everything 12=Workspace — in help text) · <code>doc pages DOC_ID [--format text/plain]</code> · <code>doc page create DOC_ID --name "Setup" --content @setup.md</code> (<code>--content</code> goes through <code>read_data_arg</code>'s <code>@file</code>/<code>-</code> handling but is kept as a STRING, not parsed as JSON) · <code>doc page update DOC_ID PAGE_ID --content @notes.md --mode append</code>.</li>
+<li><input disabled="" type="checkbox"> <strong>Step 1: failing tests</strong> — (a) <code>search_all_follows_next_cursor_over_docs_key</code> (two pages, cursor matcher, merged envelope); (b) <code>create_builds_parent_object_from_flags</code> (<code>body_json</code> asserting <code>{"name":…,"parent":{"id":"790","type":4}}</code>); (c) <code>page_update_sends_mode_and_string_content</code> (mode <code>append</code>, content is the literal file text, not JSON-parsed); (d) <code>page_get_passes_content_format</code>.</li>
+<li><input disabled="" type="checkbox"> <strong>Steps 2–4: fail → implement + wire → pass; fmt, clippy. Step 5: commit</strong> — <code>"feat: doc commands (v3)"</code>.</li>
+</ul>
+<hr>
+<h3>Task 18: Chat commands (v3)</h3>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>src/commands/chat.rs</code>; add module + <code>Command::Chat</code> (nested <code>channel</code>/<code>message</code> subcommands) + dispatch</li>
+<li>Test: <code>tests/chat_commands.rs</code></li>
+</ul>
+<p><strong>Interfaces</strong> (all paths <code>/api/v3/workspaces/{ws}/chat/…</code>; cursor listings reuse <code>merge_cursor_pages</code>, items_key <code>"data"</code>):</p>
+<pre><code class="language-rust">pub async fn channels(client, query, fetch_all) -&gt; …;                 // GET …/chat/channels
+pub async fn channel_get(client, channel_id) / channel_update(client, channel_id, data)
+    / channel_delete(client, channel_id) -&gt; …;                        // GET|PATCH|DELETE …/chat/channels/{id}
+pub async fn channel_create(client, data) -&gt; …;                       // POST …/chat/channels {name*, …}
+pub async fn channel_create_location(client, data) -&gt; …;              // POST …/chat/channels/location {location*, …}
+pub async fn channel_create_dm(client, user_ids: &amp;[String]) -&gt; …;     // POST …/chat/channels/direct_message
+pub async fn channel_members(client, channel_id, fetch_all) / channel_followers(…) -&gt; …;
+pub async fn messages(client, channel_id, fetch_all) -&gt; …;            // GET …/channels/{id}/messages
+pub async fn send(client, channel_id, data) -&gt; …;                     // POST — data must carry type (default "message") + content
+pub async fn message_update(client, message_id, data) / message_delete(client, message_id) -&gt; …;   // PATCH|DELETE …/chat/messages/{id}
+pub async fn replies(client, message_id, fetch_all) / reply(client, message_id, data) -&gt; …;
+pub async fn reactions(client, message_id, fetch_all) / react(client, message_id, reaction) 
+    / unreact(client, message_id, reaction) -&gt; …;                     // GET|POST …/reactions ; DELETE …/reactions/{reaction}
+pub async fn tagged_users(client, message_id) -&gt; …;
+</code></pre>
+<ul>
+<li>CLI: <code>chat channels --all</code> · <code>chat channel create --name eng-updates [--data J]</code> · <code>chat channel create-dm --user 75413867 --user 12345</code> · <code>chat messages CHANNEL_ID --all</code> · <code>chat send CHANNEL_ID --content "build is green" [--type post] [--data J]</code> · <code>chat reply MESSAGE_ID --content "ack"</code> · <code>chat react MESSAGE_ID heart</code> (lowercase emoji names, in help text).</li>
+<li><input disabled="" type="checkbox"> <strong>Step 1: failing tests</strong> — (a) <code>send_defaults_type_message_and_merges_content</code> (<code>body_json</code>); (b) <code>channels_all_follows_cursor_over_data_key</code>; (c) <code>react_and_unreact_hit_reaction_paths</code> (POST body <code>{"reaction":"heart"}</code>; DELETE path suffix <code>/reactions/heart</code>); (d) <code>channel_create_dm_sends_user_ids</code>.</li>
+<li><input disabled="" type="checkbox"> <strong>Steps 2–4: fail → implement + wire → pass; fmt, clippy. Step 5: commit</strong> — <code>"feat: chat commands (v3)"</code>.</li>
+</ul>
+<hr>
+<h3>Task 19: User, group, webhook, and template commands</h3>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>src/commands/user.rs</code>, <code>group.rs</code>, <code>webhook.rs</code>, <code>template.rs</code>; add modules + commands + dispatch</li>
+<li>Test: <code>tests/directory_commands.rs</code> (users/groups), <code>tests/webhook_template_commands.rs</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<pre><code class="language-rust">// user.rs — team-scoped
+pub async fn get(client, user_id, include_shared: bool) -&gt; …;   // GET /api/v2/team/{ws}/user/{id}
+pub async fn invite(client, email, admin: bool, custom_role_id: Option&lt;i64&gt;) -&gt; …;  // POST /api/v2/team/{ws}/user
+pub async fn edit(client, user_id, data) -&gt; …;                  // PUT  (API requires username+admin+custom_role_id)
+pub async fn remove(client, user_id) -&gt; …;                      // DELETE → {"removed":true,…}
+
+// group.rs
+pub async fn list(client, group_ids: Option&lt;String&gt;) -&gt; …;      // GET /api/v2/group?team_id={ws}[&amp;group_ids=…]
+pub async fn create(client, data) -&gt; …;                         // POST /api/v2/team/{ws}/group {name*, members*}
+pub async fn update(client, group_id, data) / delete(client, group_id) -&gt; …;  // PUT|DELETE /api/v2/group/{id}
+
+// webhook.rs
+pub async fn list(client) -&gt; …;                                 // GET /api/v2/team/{ws}/webhook
+pub async fn create(client, endpoint, events: &amp;[String], data) -&gt; …;
+    // POST — events merged as array; the literal "*" subscribes to everything. Response includes
+    // webhook.secret — pass through untouched (the caller needs it for X-Signature verification).
+pub async fn update(client, webhook_id, data) / delete(client, webhook_id) -&gt; …;
+
+// template.rs
+pub enum TemplateKind { Task, List, Folder }   // clap ValueEnum
+pub async fn list(client, kind, page: Option&lt;u64&gt;) -&gt; …;
+    // GET /api/v2/team/{ws}/taskTemplate?page=N (page REQUIRED by API — default 0) | /list_template | /folder_template
+</code></pre>
+<ul>
+<li>CLI: <code>user invite --email jo@cp.com [--admin]</code> · <code>group create --name eng --member 75413867 --member 123</code> (members merged into data) · <code>webhook create --endpoint https://x.example/hook --event taskUpdated --event taskDeleted</code> · <code>template list task</code>. Guests/audit-log/roles stay on <code>raw</code> (README + SKILL note).</li>
+<li><input disabled="" type="checkbox"> <strong>Step 1: failing tests</strong> — (a) <code>group_list_passes_team_id_query</code> (<code>query_param("team_id","9001")</code> on <code>/api/v2/group</code>); (b) <code>webhook_create_merges_endpoint_and_events</code>; (c) <code>template_list_defaults_page_zero</code> (<code>query_param("page","0")</code>, path per kind); (d) <code>user_invite_posts_email</code>.</li>
+<li><input disabled="" type="checkbox"> <strong>Steps 2–4: fail → implement + wire → pass; fmt, clippy. Step 5: commit</strong> — <code>"feat: user, group, webhook, and template commands"</code>.</li>
+</ul>
+<hr>
+<h3>Task 20: Agent skill (SKILL.md + skill install)</h3>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>skills/clickup-cli/SKILL.md</code>, <code>src/commands/skill.rs</code>, <code>.gitattributes</code>; add module + <code>Command::Skill { action: SkillAction }</code> + dispatch</li>
+<li>Test: <code>tests/skill_commands.rs</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<pre><code class="language-rust">pub const EMBEDDED_SKILL: &amp;str = include_str!("../../skills/clickup-cli/SKILL.md");
+pub fn resolve_target(dir_flag: Option&lt;&amp;Path&gt;, claude_config_dir_env: Option&lt;&amp;str&gt;, home: Option&lt;&amp;Path&gt;)
+    -&gt; Result&lt;PathBuf, CliError&gt;;          // pure — no disk I/O, unit-testable
+pub fn install(dir_flag: Option&lt;&amp;Path&gt;) -&gt; Result&lt;Value, CliError&gt;;
+    // {"skill":"clickup-cli","path":…,"installed":bool[,"reason":…]} — skips (never fails) when:
+    // target or parent is a symlink ("symlink — skill tracks its source repo via git"),
+    // content already identical ("already current"), or no Claude config dir (stderr tip naming --dir).
+</code></pre>
+<p>Port <code>~/projects/creativeplanning/intacct-cli/src/commands/skill.rs</code> wholesale (rename service strings). <code>.gitattributes</code>: <code>* text=auto eol=lf</code> — the SKILL.md is <code>include_str!</code>-embedded, so a CRLF checkout would change the released bytes.</p>
+<p><code>SKILL.md</code> (~90 lines, intacct skeleton — write exactly these sections):</p>
+<ul>
+<li><strong>Frontmatter</strong>: <code>name: clickup-cli</code>; <code>description: "Use when a task needs ClickUp data or actions from the command line — reading or writing tasks, lists, spaces, comments, docs, chat, time tracking, custom fields, or any ClickUp API call. Covers picking the right subcommand, bootstrapping an account, recipes, and triaging errors by exit code."</code></li>
+<li><strong>Contract line</strong>: stdout is always exactly one JSON value; errors are JSON on stderr; add <code>--pretty</code> for humans.</li>
+<li><strong>ID hierarchy primer</strong>: workspace (team) → space → folder (optional) → list → task; which verbs need which id; <code>--workspace</code> only overrides team-scoped commands; custom task IDs need <code>--custom-id</code>.</li>
+<li><strong>Pick the right command</strong> table (need → command), one row per family incl. <code>raw</code> for guests/audit/roles/legacy-time.</li>
+<li><strong>Bootstrap</strong>: <code>account add work</code> (token prompt / CLICKUP_CLI_TOKEN), <code>account test</code>, first-account-default rule.</li>
+<li><strong>Recipes</strong> (bolded lead-ins, copy-paste commands): find tasks assigned to someone across the workspace (<code>task filter --assignee … --all</code>); create a task with custom fields (<code>--data</code> with <code>custom_fields</code> array); post a comment; move vs add-to-list distinction; upload an attachment; log time against a task; append to a doc page (<code>--mode append</code>); read a chat channel.</li>
+<li><strong>Errors: exit code → action</strong> table (0/1/2/3/4; 3 = token — rerun <code>account add</code>; 4 = network after retries — the failure is real).</li>
+<li><strong>Gotchas</strong>: epoch-millisecond dates; <code>hasMore:true</code> = partial data; rate limit 100/min on most plans (retries are automatic); <code>markdown_content</code> on writes vs <code>--markdown</code> flag on reads; comment pagination is newest-first; negative time-entry duration = running timer; <code>task filter</code> needs a workspace id; deleting is permanent — no trash restore via API.</li>
+</ul>
+<ul>
+<li><input disabled="" type="checkbox"> <strong>Step 1: failing tests</strong> — port <code>~/projects/creativeplanning/intacct-cli/tests/skill_commands.rs</code>: (a) install writes the file under a tempdir CLAUDE_CONFIG_DIR-style target (pass <code>--dir</code>); (b) reinstall over identical content → <code>{"installed":false,"reason":"already current"}</code>; (c) symlinked target dir is skipped; (d) unit tests for <code>resolve_target</code> precedence (<code>--dir</code> → env → home) and a <code>--dir</code> ending in <code>SKILL.md</code> used verbatim.</li>
+<li><input disabled="" type="checkbox"> <strong>Step 2: verify failure. Step 3: write SKILL.md + implement skill.rs + wire CLI. Step 4: verify pass; fmt, clippy. Step 5: commit</strong> — <code>"feat: embedded agent skill and skill install"</code>.</li>
+</ul>
+<hr>
+<h3>Task 21: Self-update</h3>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>src/commands/update.rs</code>; add module + <code>Command::Update { check: bool, no_skill: bool }</code> + dispatch</li>
+<li>Test: unit tests inside <code>update.rs</code> (version comparison only — no network tests)</li>
+</ul>
+<p>Port <code>~/projects/creativeplanning/intacct-cli/src/commands/update.rs</code> with <code>repo_owner = "CreativePlanningBusinessServices"</code>, <code>repo_name = "clickup-cli"</code>, <code>bin_name = "clickup-cli"</code>. Keep all three hard-won details: (1) <code>spawn_blocking</code> around the sync backend; (2) version compare strips a leading <code>v</code>/<code>V</code> and uses <code>self_update::version::bump_is_greater</code>; (3) after the swap, resolve <code>current_exe()</code> BEFORE replacing, then re-exec <code>&lt;exe&gt; skill install</code> so the fresh binary refreshes the embedded skill (non-fatal on failure; <code>--no-skill</code> opts out). <code>auth_token</code> from <code>GITHUB_TOKEN</code> (private repo). <code>update --check</code> → <code>{"current","latest","updateAvailable"}</code>.</p>
+<ul>
+<li><input disabled="" type="checkbox"> <strong>Step 1: failing unit tests</strong> — <code>update_available_strips_v_prefix_and_compares_semver</code> (cases: <code>v0.2.0</code> vs <code>0.1.0</code> → true; equal → false; older → false). <strong>Steps 2–4: fail → implement + wire → pass; fmt, clippy. Step 5: commit</strong> — <code>"feat: self-update from GitHub releases"</code>.</li>
+</ul>
+<hr>
+<h3>Task 22: CI, release, live smoke, README</h3>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>.github/workflows/ci.yml</code>, <code>.github/workflows/release.yml</code>, <code>tests/live_smoke.rs</code></li>
+<li>Modify: <code>README.md</code></li>
+</ul>
+<ul>
+<li><input disabled="" type="checkbox"> <strong>Step 1: Copy both workflows from <code>~/projects/creativeplanning/intacct-cli/.github/workflows/</code></strong>, renaming <code>intacct-cli</code> → <code>clickup-cli</code> everywhere. ci.yml: push+PR, test matrix macos/windows/ubuntu <code>cargo test --locked</code>, ubuntu lint job (<code>cargo fmt --check</code>, <code>cargo clippy --all-targets -- -D warnings</code>), <code>dtolnay/rust-toolchain@stable</code> + <code>Swatinem/rust-cache@v2</code>. release.yml: <code>v*</code> tags, targets <code>aarch64-apple-darwin</code>/<code>x86_64-apple-darwin</code>/<code>x86_64-pc-windows-msvc</code>, zips <code>clickup-cli-&lt;tag&gt;-&lt;target&gt;.zip</code>, <code>softprops/action-gh-release@v2</code> with <code>permissions: contents: write</code>. No Linux release binary (keyring backend) — Linux is CI-only, stated in the README.</li>
+<li><input disabled="" type="checkbox"> <strong>Step 2: Write <code>tests/live_smoke.rs</code></strong> — all <code>#[ignore = "live: set CLICKUP_LIVE_ALIAS and run cargo test --test live_smoke -- --ignored"]</code>, driven through the real <code>context_for</code>: <code>account test</code>, <code>workspace list</code>, <code>task filter --page 0</code>. Module doc comment carries the run instructions. CI compiles but never runs it.</li>
+<li><input disabled="" type="checkbox"> <strong>Step 3: Rewrite <code>README.md</code></strong> (~120 lines, intacct style): what it is, install (release download + <code>GITHUB_TOKEN</code> note for the private repo, <code>cargo install --path .</code> for dev), bootstrap block, the pick-the-right-command table (same as SKILL.md), output contract + exit-code table, pagination note (<code>--all</code>/<code>hasMore</code>), skill install/update section with the three skip reasons and the version-skew caveat, development (test/fmt/clippy, release tagging convention: <code>chore: bump version to X.Y.Z</code> then tag <code>vX.Y.Z</code>).</li>
+<li><input disabled="" type="checkbox"> <strong>Step 4: Full check</strong> — <code>cargo test --locked</code>, fmt, clippy all green.</li>
+<li><input disabled="" type="checkbox"> <strong>Step 5: Commit</strong> — <code>"chore: CI, release workflow, live smoke tests, README"</code>.</li>
+</ul>
+<hr>
+<div class="decision-panel">
+  <h3>Decision: how should we execute this plan?</h3>
+  <a class="btn btn-primary" href="http://127.0.0.1:8137/pick?c=subagent&amp;l=Subagent-driven" target="_blank">Subagent-driven (recommended) — fresh subagent per task, review between tasks</a>
+  <a class="btn btn-secondary" href="http://127.0.0.1:8137/pick?c=inline&amp;l=Inline" target="_blank">Inline — execute in this session with checkpoints</a>
+  <a class="btn btn-secondary" href="http://127.0.0.1:8137/pick?c=changes&amp;l=Request+changes" target="_blank">I have changes — I'll describe them in chat</a>
+</div>
+</body>
+</html>
