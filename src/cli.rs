@@ -7,8 +7,8 @@ use serde_json::Value;
 use crate::client::CuClient;
 use crate::commands;
 use crate::commands::{
-    account, checklist, comment, config_cmd, field, folder, list, raw, space, tag, task, time,
-    workspace,
+    account, checklist, comment, config_cmd, field, folder, goal, list, raw, space, tag, task,
+    time, view, workspace,
 };
 use crate::context::{DEFAULT_BASE, context_for};
 use crate::error::CliError;
@@ -116,6 +116,16 @@ pub enum Command {
     Time {
         #[command(subcommand)]
         action: TimeAction,
+    },
+    /// Views (List/Board/Calendar/etc.), scoped to a list/folder/space or the whole workspace
+    View {
+        #[command(subcommand)]
+        action: ViewAction,
+    },
+    /// Goals and their key results
+    Goal {
+        #[command(subcommand)]
+        action: GoalAction,
     },
 }
 
@@ -983,6 +993,127 @@ pub enum TimeTagAction {
     },
 }
 
+#[derive(Subcommand)]
+pub enum ViewAction {
+    /// List views scoped to a space/folder/list, or (with none of those given) the current
+    /// workspace
+    #[command(
+        after_help = "Examples:\n  clickup-cli view list --space 790\n  clickup-cli view list\n\nGive at most one of --space/--folder/--list; with none given, lists workspace-wide views.",
+        group(ArgGroup::new("view_list_location").args(["space", "folder", "list"]).multiple(false))
+    )]
+    List {
+        #[arg(long)]
+        space: Option<String>,
+        #[arg(long)]
+        folder: Option<String>,
+        #[arg(long)]
+        list: Option<String>,
+    },
+    /// Create a view scoped to a space/folder/list, or (with none of those given) the current
+    /// workspace
+    #[command(
+        after_help = "Example: clickup-cli view create --list 124 --data @view.json\n\nGive at most one of --space/--folder/--list; with none given, creates a workspace-wide view. --data is the full view definition ClickUp expects (name, type, settings, ...).",
+        group(ArgGroup::new("view_create_location").args(["space", "folder", "list"]).multiple(false))
+    )]
+    Create {
+        #[arg(long)]
+        space: Option<String>,
+        #[arg(long)]
+        folder: Option<String>,
+        #[arg(long)]
+        list: Option<String>,
+        /// Request body: inline JSON, @file, or - for stdin
+        #[arg(long)]
+        data: String,
+    },
+    /// Get a single view
+    #[command(after_help = "Example: clickup-cli view get vw1")]
+    Get { view_id: String },
+    /// Update a view
+    #[command(after_help = "Example: clickup-cli view update vw1 --data '{\"name\": \"Renamed\"}'")]
+    Update {
+        view_id: String,
+        #[arg(long)]
+        data: String,
+    },
+    /// Delete a view
+    #[command(after_help = "Example: clickup-cli view delete vw1")]
+    Delete { view_id: String },
+    /// List the tasks a view resolves to
+    #[command(
+        after_help = "Example: clickup-cli view tasks vw1 --all\n\n--all merges every page into one {items,count,hasMore} envelope; omit it to fetch a single --page (default 0)."
+    )]
+    Tasks {
+        view_id: String,
+        #[arg(long)]
+        page: Option<u64>,
+        /// Fetch and merge every page instead of just --page
+        #[arg(long)]
+        all: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GoalAction {
+    /// List goals in the current workspace
+    #[command(after_help = "Example: clickup-cli goal list --include-completed")]
+    List {
+        #[arg(long = "include-completed")]
+        include_completed: bool,
+    },
+    /// Get a single goal
+    #[command(after_help = "Example: clickup-cli goal get g1")]
+    Get { goal_id: String },
+    /// Create a goal in the current workspace
+    #[command(
+        after_help = "Example: clickup-cli goal create --data '{\"name\":\"Q3 targets\",\"due_date\":1756684800000}'"
+    )]
+    Create {
+        #[arg(long)]
+        data: String,
+    },
+    /// Update a goal
+    #[command(after_help = "Example: clickup-cli goal update g1 --data '{\"name\": \"Renamed\"}'")]
+    Update {
+        goal_id: String,
+        #[arg(long)]
+        data: String,
+    },
+    /// Delete a goal
+    #[command(after_help = "Example: clickup-cli goal delete g1")]
+    Delete { goal_id: String },
+    /// Add, update, or remove a key result on a goal
+    KeyResult {
+        #[command(subcommand)]
+        action: GoalKeyResultAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GoalKeyResultAction {
+    /// Add a key result to a goal
+    #[command(
+        after_help = "Example: clickup-cli goal key-result add g1 --data '{\"name\":\"Ship it\",\"type\":\"number\",\"steps_start\":0,\"steps_end\":10}'"
+    )]
+    Add {
+        goal_id: String,
+        #[arg(long)]
+        data: String,
+    },
+    /// Update a key result
+    #[command(
+        after_help = "Example: clickup-cli goal key-result update kr1 --data '{\"steps_current\": 5}'"
+    )]
+    Update {
+        key_result_id: String,
+        #[arg(long)]
+        data: String,
+    },
+    /// Remove a key result from a goal
+    #[command(after_help = "Example: clickup-cli goal key-result remove kr1")]
+    Remove { key_result_id: String },
+}
+
 pub async fn cli_main() -> i32 {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -1059,6 +1190,8 @@ async fn dispatch(cli: &Cli) -> Result<Value, CliError> {
         Command::Field { action } => dispatch_field(cli, action).await,
         Command::Tag { action } => dispatch_tag(cli, action).await,
         Command::Time { action } => dispatch_time(cli, action).await,
+        Command::View { action } => dispatch_view(cli, action).await,
+        Command::Goal { action } => dispatch_goal(cli, action).await,
     }
 }
 
@@ -1668,6 +1801,83 @@ async fn dispatch_time_tag(client: &CuClient, action: &TimeTagAction) -> Result<
     }
 }
 
+async fn dispatch_view(cli: &Cli, action: &ViewAction) -> Result<Value, CliError> {
+    let context = context_for(cli.account.as_deref(), cli.workspace.as_deref())?;
+    match action {
+        ViewAction::List {
+            space,
+            folder,
+            list,
+        } => {
+            let location =
+                view::location_from(space.as_deref(), folder.as_deref(), list.as_deref());
+            view::list(&context.client, &location).await
+        }
+        ViewAction::Create {
+            space,
+            folder,
+            list,
+            data,
+        } => {
+            let location =
+                view::location_from(space.as_deref(), folder.as_deref(), list.as_deref());
+            let body = commands::read_data_arg(data)?;
+            view::create(&context.client, &location, body).await
+        }
+        ViewAction::Get { view_id } => view::get(&context.client, view_id).await,
+        ViewAction::Update { view_id, data } => {
+            let body = commands::read_data_arg(data)?;
+            view::update(&context.client, view_id, body).await
+        }
+        ViewAction::Delete { view_id } => view::delete(&context.client, view_id).await,
+        ViewAction::Tasks { view_id, page, all } => {
+            view::tasks(&context.client, view_id, *page, *all).await
+        }
+    }
+}
+
+async fn dispatch_goal(cli: &Cli, action: &GoalAction) -> Result<Value, CliError> {
+    let context = context_for(cli.account.as_deref(), cli.workspace.as_deref())?;
+    match action {
+        GoalAction::List { include_completed } => {
+            goal::list(&context.client, *include_completed).await
+        }
+        GoalAction::Get { goal_id } => goal::get(&context.client, goal_id).await,
+        GoalAction::Create { data } => {
+            let body = commands::read_data_arg(data)?;
+            goal::create(&context.client, body).await
+        }
+        GoalAction::Update { goal_id, data } => {
+            let body = commands::read_data_arg(data)?;
+            goal::update(&context.client, goal_id, body).await
+        }
+        GoalAction::Delete { goal_id } => goal::delete(&context.client, goal_id).await,
+        GoalAction::KeyResult { action } => dispatch_goal_key_result(&context.client, action).await,
+    }
+}
+
+async fn dispatch_goal_key_result(
+    client: &CuClient,
+    action: &GoalKeyResultAction,
+) -> Result<Value, CliError> {
+    match action {
+        GoalKeyResultAction::Add { goal_id, data } => {
+            let body = commands::read_data_arg(data)?;
+            goal::key_result_add(client, goal_id, body).await
+        }
+        GoalKeyResultAction::Update {
+            key_result_id,
+            data,
+        } => {
+            let body = commands::read_data_arg(data)?;
+            goal::key_result_update(client, key_result_id, body).await
+        }
+        GoalKeyResultAction::Remove { key_result_id } => {
+            goal::key_result_remove(client, key_result_id).await
+        }
+    }
+}
+
 fn dispatch_config(action: &ConfigAction) -> Result<Value, CliError> {
     let config_path = crate::config::default_config_path()?;
     match action {
@@ -2026,6 +2236,71 @@ mod tests {
     #[test]
     fn time_stop_parses_with_no_args() {
         Cli::try_parse_from(["clickup-cli", "time", "stop"]).expect("time stop should parse");
+    }
+
+    #[test]
+    fn view_list_rejects_more_than_one_location() {
+        expect_parse_error(&[
+            "clickup-cli",
+            "view",
+            "list",
+            "--space",
+            "790",
+            "--folder",
+            "457",
+        ]);
+    }
+
+    #[test]
+    fn view_list_with_no_location_parses_as_workspace_scoped() {
+        Cli::try_parse_from(["clickup-cli", "view", "list"])
+            .expect("no location flags should parse (falls back to workspace scope)");
+    }
+
+    #[test]
+    fn view_list_honors_the_global_workspace_override_after_the_subcommand() {
+        // Same precedent as `field list`: a bare `--workspace` flag on `view list` would
+        // collide with the global `--workspace <id>` override, so there's no local flag —
+        // this only exercises that the global override still parses alongside the subcommand.
+        Cli::try_parse_from(["clickup-cli", "view", "list", "--workspace", "9001"])
+            .expect("global --workspace override should parse alongside view list");
+    }
+
+    #[test]
+    fn view_create_requires_data() {
+        expect_parse_error(&["clickup-cli", "view", "create", "--list", "124"]);
+    }
+
+    #[test]
+    fn view_tasks_parses_with_all_flag() {
+        Cli::try_parse_from(["clickup-cli", "view", "tasks", "vw1", "--all"])
+            .expect("view tasks should parse");
+    }
+
+    #[test]
+    fn goal_create_parses() {
+        Cli::try_parse_from([
+            "clickup-cli",
+            "goal",
+            "create",
+            "--data",
+            r#"{"name":"Q3 targets","due_date":1756684800000}"#,
+        ])
+        .expect("goal create should parse");
+    }
+
+    #[test]
+    fn goal_key_result_add_parses() {
+        Cli::try_parse_from([
+            "clickup-cli",
+            "goal",
+            "key-result",
+            "add",
+            "g1",
+            "--data",
+            r#"{"name":"Ship it"}"#,
+        ])
+        .expect("goal key-result add should parse");
     }
 
     #[test]

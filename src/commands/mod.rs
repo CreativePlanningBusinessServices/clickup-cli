@@ -4,12 +4,14 @@ pub mod comment;
 pub mod config_cmd;
 pub mod field;
 pub mod folder;
+pub mod goal;
 pub mod list;
 pub mod raw;
 pub mod space;
 pub mod tag;
 pub mod task;
 pub mod time;
+pub mod view;
 pub mod workspace;
 
 use std::io::Read;
