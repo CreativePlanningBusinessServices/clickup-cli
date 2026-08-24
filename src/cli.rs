@@ -7,7 +7,7 @@ use serde_json::Value;
 use crate::client::CuClient;
 use crate::commands;
 use crate::commands::{
-    account, checklist, comment, config_cmd, field, folder, goal, list, raw, space, tag, task,
+    account, checklist, comment, config_cmd, doc, field, folder, goal, list, raw, space, tag, task,
     time, view, workspace,
 };
 use crate::context::{DEFAULT_BASE, context_for};
@@ -126,6 +126,11 @@ pub enum Command {
     Goal {
         #[command(subcommand)]
         action: GoalAction,
+    },
+    /// Docs (v3) and their pages
+    Doc {
+        #[command(subcommand)]
+        action: DocAction,
     },
 }
 
@@ -1114,6 +1119,149 @@ pub enum GoalKeyResultAction {
     Remove { key_result_id: String },
 }
 
+const PARENT_TYPE_HELP: &str = "Parent types: 4=Space 5=Folder 6=List 7=Everything 12=Workspace";
+
+#[derive(Subcommand)]
+pub enum DocAction {
+    /// Search docs in the current workspace
+    #[command(
+        after_help = "Examples:\n  clickup-cli doc search --parent-id 790 --parent-type 4\n  clickup-cli doc search --all\n\nAll filters are optional; omit them to search every doc in the workspace. --all merges every page into one {items,count,hasMore} envelope; omit it to fetch a single page from --cursor."
+    )]
+    Search {
+        #[arg(long = "parent-id")]
+        parent_id: Option<String>,
+        #[arg(long = "parent-type", help = PARENT_TYPE_HELP)]
+        parent_type: Option<i64>,
+        #[arg(long)]
+        creator: Option<String>,
+        #[arg(long)]
+        deleted: Option<bool>,
+        #[arg(long)]
+        archived: Option<bool>,
+        #[arg(long)]
+        limit: Option<i64>,
+        /// Fetch one page starting from this cursor
+        #[arg(long)]
+        cursor: Option<String>,
+        /// Fetch and merge every page instead of just one
+        #[arg(long)]
+        all: bool,
+    },
+    /// Create a doc
+    #[command(
+        after_help = "Example: clickup-cli doc create --name \"Runbook\" --parent-id 790 --parent-type 4"
+    )]
+    Create {
+        #[arg(long)]
+        name: String,
+        #[arg(long = "parent-id")]
+        parent_id: String,
+        #[arg(long = "parent-type", help = PARENT_TYPE_HELP)]
+        parent_type: i64,
+        /// Request body: inline JSON, @file, or - for stdin; merged under --name/--parent-id/--parent-type
+        #[arg(long)]
+        data: Option<String>,
+    },
+    /// Get a single doc
+    #[command(after_help = "Example: clickup-cli doc get doc1")]
+    Get { doc_id: String },
+    /// List a doc's pages as a hierarchy of ids/names, without content
+    #[command(after_help = "Example: clickup-cli doc page-listing doc1 --depth 2")]
+    PageListing {
+        doc_id: String,
+        /// How many levels of subpages to include
+        #[arg(long)]
+        depth: Option<i64>,
+    },
+    /// Get all of a doc's pages, with content
+    #[command(after_help = "Example: clickup-cli doc pages doc1 --format text/plain")]
+    Pages {
+        doc_id: String,
+        /// How many levels of subpages to include
+        #[arg(long)]
+        depth: Option<i64>,
+        #[arg(long)]
+        format: Option<String>,
+    },
+    /// Get, create, or update a single doc page
+    Page {
+        #[command(subcommand)]
+        action: DocPageAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum DocPageAction {
+    /// Get a single page
+    #[command(after_help = "Example: clickup-cli doc page get doc1 page1 --format text/plain")]
+    Get {
+        doc_id: String,
+        page_id: String,
+        #[arg(long)]
+        format: Option<String>,
+    },
+    /// Create a page in a doc
+    #[command(
+        after_help = "Example: clickup-cli doc page create doc1 --name \"Setup\" --content @setup.md\n\n--content is read the same way --data is (inline text, @file, or -), but is always sent as a plain string, never parsed as JSON."
+    )]
+    Create {
+        doc_id: String,
+        #[arg(long = "parent-page-id")]
+        parent_page_id: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long = "sub-title")]
+        sub_title: Option<String>,
+        /// Page content: inline text, @file, or - for stdin; sent as a plain string, never JSON-parsed
+        #[arg(long)]
+        content: Option<String>,
+        #[arg(long = "content-format")]
+        content_format: Option<String>,
+        /// Request body: inline JSON, @file, or - for stdin; merged under the flags above
+        #[arg(long)]
+        data: Option<String>,
+    },
+    /// Update a page
+    #[command(
+        after_help = "Example: clickup-cli doc page update doc1 page1 --content @notes.md --mode append\n\n--content is read the same way --data is (inline text, @file, or -), but is always sent as a plain string, never parsed as JSON."
+    )]
+    Update {
+        doc_id: String,
+        page_id: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long = "sub-title")]
+        sub_title: Option<String>,
+        /// Page content: inline text, @file, or - for stdin; sent as a plain string, never JSON-parsed
+        #[arg(long)]
+        content: Option<String>,
+        #[arg(long, value_enum)]
+        mode: Option<ContentEditMode>,
+        #[arg(long = "content-format")]
+        content_format: Option<String>,
+        /// Request body: inline JSON, @file, or - for stdin; merged under the flags above
+        #[arg(long)]
+        data: Option<String>,
+    },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum ContentEditMode {
+    Replace,
+    Append,
+    Prepend,
+}
+
+impl ContentEditMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            ContentEditMode::Replace => "replace",
+            ContentEditMode::Append => "append",
+            ContentEditMode::Prepend => "prepend",
+        }
+    }
+}
+
 pub async fn cli_main() -> i32 {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -1192,6 +1340,7 @@ async fn dispatch(cli: &Cli) -> Result<Value, CliError> {
         Command::Time { action } => dispatch_time(cli, action).await,
         Command::View { action } => dispatch_view(cli, action).await,
         Command::Goal { action } => dispatch_goal(cli, action).await,
+        Command::Doc { action } => dispatch_doc(cli, action).await,
     }
 }
 
@@ -1878,6 +2027,112 @@ async fn dispatch_goal_key_result(
     }
 }
 
+async fn dispatch_doc(cli: &Cli, action: &DocAction) -> Result<Value, CliError> {
+    let context = context_for(cli.account.as_deref(), cli.workspace.as_deref())?;
+    match action {
+        DocAction::Search {
+            parent_id,
+            parent_type,
+            creator,
+            deleted,
+            archived,
+            limit,
+            cursor,
+            all,
+        } => {
+            let query = doc::build_search_query(
+                parent_id.as_deref(),
+                *parent_type,
+                creator.as_deref(),
+                *deleted,
+                *archived,
+                *limit,
+                cursor.as_deref(),
+            );
+            doc::search(&context.client, &query, *all).await
+        }
+        DocAction::Create {
+            name,
+            parent_id,
+            parent_type,
+            data,
+        } => {
+            let data = commands::parse_data_flag(data.as_deref())?;
+            let body = doc::build_create_body(data, name, parent_id, *parent_type);
+            doc::create(&context.client, body).await
+        }
+        DocAction::Get { doc_id } => doc::get(&context.client, doc_id).await,
+        DocAction::PageListing { doc_id, depth } => {
+            doc::page_listing(&context.client, doc_id, *depth).await
+        }
+        DocAction::Pages {
+            doc_id,
+            depth,
+            format,
+        } => doc::pages(&context.client, doc_id, *depth, format.as_deref()).await,
+        DocAction::Page { action } => dispatch_doc_page(&context.client, action).await,
+    }
+}
+
+async fn dispatch_doc_page(client: &CuClient, action: &DocPageAction) -> Result<Value, CliError> {
+    match action {
+        DocPageAction::Get {
+            doc_id,
+            page_id,
+            format,
+        } => doc::page_get(client, doc_id, page_id, format.as_deref()).await,
+        DocPageAction::Create {
+            doc_id,
+            parent_page_id,
+            name,
+            sub_title,
+            content,
+            content_format,
+            data,
+        } => {
+            let data = commands::parse_data_flag(data.as_deref())?;
+            let content = content
+                .as_deref()
+                .map(commands::read_text_arg)
+                .transpose()?;
+            let body = doc::build_page_create_body(
+                data,
+                parent_page_id.as_deref(),
+                name.as_deref(),
+                sub_title.as_deref(),
+                content,
+                content_format.as_deref(),
+            );
+            doc::page_create(client, doc_id, body).await
+        }
+        DocPageAction::Update {
+            doc_id,
+            page_id,
+            name,
+            sub_title,
+            content,
+            mode,
+            content_format,
+            data,
+        } => {
+            let data = commands::parse_data_flag(data.as_deref())?;
+            let content = content
+                .as_deref()
+                .map(commands::read_text_arg)
+                .transpose()?;
+            let body = doc::build_page_update_body(
+                data,
+                name.as_deref(),
+                sub_title.as_deref(),
+                content,
+                mode.map(ContentEditMode::as_str),
+                content_format.as_deref(),
+            );
+            doc::page_update(client, doc_id, page_id, body).await
+        }
+    }
+}
+
 fn dispatch_config(action: &ConfigAction) -> Result<Value, CliError> {
     let config_path = crate::config::default_config_path()?;
     match action {
@@ -2301,6 +2556,72 @@ mod tests {
             r#"{"name":"Ship it"}"#,
         ])
         .expect("goal key-result add should parse");
+    }
+
+    #[test]
+    fn doc_create_requires_name_parent_id_and_parent_type() {
+        expect_parse_error(&["clickup-cli", "doc", "create", "--name", "Runbook"]);
+        Cli::try_parse_from([
+            "clickup-cli",
+            "doc",
+            "create",
+            "--name",
+            "Runbook",
+            "--parent-id",
+            "790",
+            "--parent-type",
+            "4",
+        ])
+        .expect("doc create with name/parent-id/parent-type should parse");
+    }
+
+    #[test]
+    fn doc_search_parses_with_no_flags() {
+        Cli::try_parse_from(["clickup-cli", "doc", "search"])
+            .expect("doc search with no filters should parse");
+    }
+
+    #[test]
+    fn doc_page_update_parses_mode_value_enum() {
+        Cli::try_parse_from([
+            "clickup-cli",
+            "doc",
+            "page",
+            "update",
+            "doc1",
+            "page1",
+            "--content",
+            "more notes",
+            "--mode",
+            "append",
+        ])
+        .expect("doc page update with --mode append should parse");
+        expect_parse_error(&[
+            "clickup-cli",
+            "doc",
+            "page",
+            "update",
+            "doc1",
+            "page1",
+            "--mode",
+            "not-a-mode",
+        ]);
+    }
+
+    #[test]
+    fn doc_page_create_parses() {
+        Cli::try_parse_from([
+            "clickup-cli",
+            "doc",
+            "page",
+            "create",
+            "doc1",
+            "--name",
+            "Setup",
+            "--content",
+            "@setup.md",
+        ])
+        .expect("doc page create should parse");
     }
 
     #[test]

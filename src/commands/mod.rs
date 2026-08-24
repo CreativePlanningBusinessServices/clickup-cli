@@ -2,6 +2,7 @@ pub mod account;
 pub mod checklist;
 pub mod comment;
 pub mod config_cmd;
+pub mod doc;
 pub mod field;
 pub mod folder;
 pub mod goal;
@@ -188,6 +189,13 @@ pub fn read_value_arg(value: &str) -> Result<Value, CliError> {
     Ok(serde_json::from_str(&text).unwrap_or(Value::String(text)))
 }
 
+/// Reads a `--content`-style argument the same way `--data` is read (inline text, `@file`, or
+/// `-` for stdin), but the result always stays a raw string — never parsed as JSON. Used by
+/// `doc page create`/`doc page update`'s `--content`, which is markdown/plain text, not JSON.
+pub fn read_text_arg(data: &str) -> Result<String, CliError> {
+    resolve_data_text(data)
+}
+
 /// Parses an optional `--data` flag into a JSON body, defaulting to an empty object when the
 /// flag is absent — the base every create/update dispatch arm layers scalar convenience flags
 /// (via `merge_flag`) on top of.
@@ -301,6 +309,22 @@ mod tests {
 
         let value = read_value_arg(&file_arg).unwrap();
         assert_eq!(value, Value::String("urgent".to_string()));
+    }
+
+    #[test]
+    fn read_text_arg_keeps_valid_json_looking_text_as_a_string() {
+        let value = read_text_arg(r#"{"not": "parsed"}"#).unwrap();
+        assert_eq!(value, r#"{"not": "parsed"}"#.to_string());
+    }
+
+    #[test]
+    fn read_text_arg_reads_from_file() {
+        let mut temp_file = tempfile::NamedTempFile::new().unwrap();
+        write!(temp_file, "# Setup\n\nplain text").unwrap();
+        let file_arg = format!("@{}", temp_file.path().display());
+
+        let value = read_text_arg(&file_arg).unwrap();
+        assert_eq!(value, "# Setup\n\nplain text".to_string());
     }
 
     #[test]
