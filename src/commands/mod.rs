@@ -1,11 +1,15 @@
 pub mod account;
 pub mod config_cmd;
+pub mod folder;
 pub mod raw;
+pub mod space;
+pub mod workspace;
 
 use std::io::Read;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
+use crate::client::CuResponse;
 use crate::error::CliError;
 
 /// Reads a `--data`-style argument: inline JSON, `@file` to read a file, or `-` for stdin.
@@ -24,6 +28,31 @@ pub fn read_data_arg(data: &str) -> Result<Value, CliError> {
     };
     serde_json::from_str(&text)
         .map_err(|parse_error| CliError::Usage(format!("data is not valid JSON: {parse_error}")))
+}
+
+/// Parses an optional `--data` flag into a JSON body, defaulting to an empty object when the
+/// flag is absent — the base every create/update dispatch arm layers scalar convenience flags
+/// (via `merge_flag`) on top of.
+pub fn parse_data_flag(data: Option<&str>) -> Result<Value, CliError> {
+    data.map(read_data_arg)
+        .transpose()
+        .map(|body| body.unwrap_or_else(|| json!({})))
+}
+
+/// Sets `body[key]` from `value` when present, leaving `body` untouched otherwise. Every
+/// create/update command layers a scalar convenience flag (e.g. `--name`) over the `--data`
+/// JSON blob this way — the flag always wins over whatever the same key holds in `--data`.
+pub fn merge_flag<T: Into<Value>>(body: &mut Value, key: &str, value: Option<T>) {
+    if let Some(scalar) = value {
+        body[key] = scalar.into();
+    }
+}
+
+/// A successful JSON body passes through unchanged; a body-less success (some DELETEs return
+/// 204 with no body) falls back to `{"status": <code>}` so the caller still gets JSON back.
+pub fn pass_through(response: CuResponse) -> Value {
+    let status = response.status;
+    response.body.unwrap_or_else(|| json!({"status": status}))
 }
 
 /// Parses repeated `key=value` flags.
@@ -120,5 +149,51 @@ mod tests {
     fn rejects_header_pair_without_colon() {
         let result = parse_header_pairs(&["X-Custom-Header".to_string()]);
         assert!(matches!(result, Err(CliError::Usage(_))));
+    }
+
+    #[test]
+    fn parse_data_flag_defaults_to_empty_object_when_absent() {
+        assert_eq!(parse_data_flag(None).unwrap(), serde_json::json!({}));
+    }
+
+    #[test]
+    fn parse_data_flag_parses_the_given_json() {
+        let parsed = parse_data_flag(Some(r#"{"name": "Acme"}"#)).unwrap();
+        assert_eq!(parsed, serde_json::json!({"name": "Acme"}));
+    }
+
+    #[test]
+    fn merge_flag_overrides_an_existing_key() {
+        let mut body = serde_json::json!({"name": "DataName", "multiple_assignees": true});
+        merge_flag(&mut body, "name", Some("FlagName".to_string()));
+        assert_eq!(
+            body,
+            serde_json::json!({"name": "FlagName", "multiple_assignees": true})
+        );
+    }
+
+    #[test]
+    fn merge_flag_leaves_body_untouched_when_value_is_none() {
+        let mut body = serde_json::json!({"name": "DataName"});
+        merge_flag(&mut body, "name", None::<String>);
+        assert_eq!(body, serde_json::json!({"name": "DataName"}));
+    }
+
+    #[test]
+    fn pass_through_returns_the_body_when_present() {
+        let response = CuResponse {
+            status: 200,
+            body: Some(serde_json::json!({"id": "90123"})),
+        };
+        assert_eq!(pass_through(response), serde_json::json!({"id": "90123"}));
+    }
+
+    #[test]
+    fn pass_through_falls_back_to_status_when_body_is_empty() {
+        let response = CuResponse {
+            status: 204,
+            body: None,
+        };
+        assert_eq!(pass_through(response), serde_json::json!({"status": 204}));
     }
 }

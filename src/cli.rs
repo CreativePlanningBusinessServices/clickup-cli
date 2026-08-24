@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 use serde_json::Value;
 
 use crate::commands;
-use crate::commands::{account, config_cmd, raw};
+use crate::commands::{account, config_cmd, folder, raw, space, workspace};
 use crate::context::{DEFAULT_BASE, context_for};
 use crate::error::CliError;
 use crate::output;
@@ -61,6 +61,21 @@ pub enum Command {
         /// Request body: inline JSON, @file, or - for stdin
         #[arg(long)]
         data: Option<String>,
+    },
+    /// Workspaces (ClickUp calls them "teams") the token can see
+    Workspace {
+        #[command(subcommand)]
+        action: WorkspaceAction,
+    },
+    /// Spaces within a workspace
+    Space {
+        #[command(subcommand)]
+        action: SpaceAction,
+    },
+    /// Folders within a space
+    Folder {
+        #[command(subcommand)]
+        action: FolderAction,
     },
 }
 
@@ -124,6 +139,120 @@ pub enum ConfigAction {
     /// Set a configuration value
     #[command(after_help = "Example: clickup-cli config set default_account work")]
     Set { key: String, value: String },
+}
+
+#[derive(Subcommand)]
+pub enum WorkspaceAction {
+    /// List every workspace the token can see
+    #[command(after_help = "Example: clickup-cli workspace list")]
+    List,
+    /// Seat usage and limits for the current workspace
+    #[command(after_help = "Example: clickup-cli workspace seats")]
+    Seats,
+    /// Billing plan details for the current workspace
+    #[command(after_help = "Example: clickup-cli workspace plan")]
+    Plan,
+    /// Hierarchy shared with the current user in the current workspace
+    #[command(after_help = "Example: clickup-cli workspace shared")]
+    Shared,
+    /// Custom task types configured on the current workspace
+    #[command(after_help = "Example: clickup-cli workspace task-types")]
+    TaskTypes,
+}
+
+#[derive(Subcommand)]
+pub enum SpaceAction {
+    /// List spaces in the current workspace
+    #[command(after_help = "Example: clickup-cli space list --archived")]
+    List {
+        #[arg(long)]
+        archived: bool,
+    },
+    /// Get a single space
+    #[command(after_help = "Example: clickup-cli space get 90123")]
+    Get { space_id: String },
+    /// Create a space in the current workspace
+    #[command(
+        after_help = "Examples:\n  clickup-cli space create --name \"Engineering\"\n  clickup-cli space create --name \"Engineering\" --data '{\"multiple_assignees\": true}'\n\n--data supplies fields --name doesn't cover, like multiple_assignees or features; --name always wins if both set name."
+    )]
+    Create {
+        #[arg(long)]
+        name: String,
+        /// Request body: inline JSON, @file, or - for stdin; merged under --name
+        #[arg(long)]
+        data: Option<String>,
+    },
+    /// Update a space
+    #[command(
+        after_help = "Example: clickup-cli space update 90123 --data '{\"name\": \"Renamed\"}'"
+    )]
+    Update {
+        space_id: String,
+        #[arg(long)]
+        data: Option<String>,
+    },
+    /// Delete a space
+    #[command(after_help = "Example: clickup-cli space delete 90123")]
+    Delete { space_id: String },
+}
+
+#[derive(Subcommand)]
+pub enum FolderAction {
+    /// List folders in a space
+    #[command(after_help = "Example: clickup-cli folder list 90123 --archived")]
+    List {
+        space_id: String,
+        #[arg(long)]
+        archived: bool,
+    },
+    /// Get a single folder
+    #[command(after_help = "Example: clickup-cli folder get 457 --include-subfolders")]
+    Get {
+        folder_id: String,
+        #[arg(long)]
+        include_subfolders: bool,
+    },
+    /// Create a folder in a space
+    #[command(after_help = "Example: clickup-cli folder create 90123 --name \"Sprints\"")]
+    Create {
+        space_id: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        data: Option<String>,
+    },
+    /// Update a folder
+    #[command(
+        after_help = "Example: clickup-cli folder update 457 --data '{\"name\": \"Renamed\"}'"
+    )]
+    Update {
+        folder_id: String,
+        #[arg(long)]
+        data: Option<String>,
+    },
+    /// Delete a folder
+    #[command(after_help = "Example: clickup-cli folder delete 457")]
+    Delete { folder_id: String },
+    /// Move a folder into a different space
+    #[command(after_help = "Example: clickup-cli folder move 457 --data '{\"space_id\": \"123\"}'")]
+    Move {
+        folder_id: String,
+        /// Request body: inline JSON, @file, or - for stdin; e.g. {"space_id": "123"}
+        #[arg(long)]
+        data: String,
+    },
+    /// Create a folder from a folder template
+    #[command(
+        after_help = "Example: clickup-cli folder from-template 90123 tmpl_1 --name \"Sprint 12\""
+    )]
+    FromTemplate {
+        space_id: String,
+        template_id: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        data: Option<String>,
+    },
 }
 
 pub async fn cli_main() -> i32 {
@@ -191,6 +320,79 @@ async fn dispatch(cli: &Cli) -> Result<Value, CliError> {
                 body,
             )
             .await
+        }
+        Command::Workspace { action } => dispatch_workspace(cli, action).await,
+        Command::Space { action } => dispatch_space(cli, action).await,
+        Command::Folder { action } => dispatch_folder(cli, action).await,
+    }
+}
+
+async fn dispatch_workspace(cli: &Cli, action: &WorkspaceAction) -> Result<Value, CliError> {
+    let context = context_for(cli.account.as_deref(), cli.workspace.as_deref())?;
+    match action {
+        WorkspaceAction::List => workspace::list(&context.client).await,
+        WorkspaceAction::Seats => workspace::seats(&context.client).await,
+        WorkspaceAction::Plan => workspace::plan(&context.client).await,
+        WorkspaceAction::Shared => workspace::shared(&context.client).await,
+        WorkspaceAction::TaskTypes => workspace::task_types(&context.client).await,
+    }
+}
+
+async fn dispatch_space(cli: &Cli, action: &SpaceAction) -> Result<Value, CliError> {
+    let context = context_for(cli.account.as_deref(), cli.workspace.as_deref())?;
+    match action {
+        SpaceAction::List { archived } => space::list(&context.client, *archived).await,
+        SpaceAction::Get { space_id } => space::get(&context.client, space_id).await,
+        SpaceAction::Create { name, data } => {
+            let mut body = commands::parse_data_flag(data.as_deref())?;
+            commands::merge_flag(&mut body, "name", Some(name.clone()));
+            space::create(&context.client, body).await
+        }
+        SpaceAction::Update { space_id, data } => {
+            let body = commands::parse_data_flag(data.as_deref())?;
+            space::update(&context.client, space_id, body).await
+        }
+        SpaceAction::Delete { space_id } => space::delete(&context.client, space_id).await,
+    }
+}
+
+async fn dispatch_folder(cli: &Cli, action: &FolderAction) -> Result<Value, CliError> {
+    let context = context_for(cli.account.as_deref(), cli.workspace.as_deref())?;
+    match action {
+        FolderAction::List { space_id, archived } => {
+            folder::list(&context.client, space_id, *archived).await
+        }
+        FolderAction::Get {
+            folder_id,
+            include_subfolders,
+        } => folder::get(&context.client, folder_id, *include_subfolders).await,
+        FolderAction::Create {
+            space_id,
+            name,
+            data,
+        } => {
+            let mut body = commands::parse_data_flag(data.as_deref())?;
+            commands::merge_flag(&mut body, "name", Some(name.clone()));
+            folder::create(&context.client, space_id, body).await
+        }
+        FolderAction::Update { folder_id, data } => {
+            let body = commands::parse_data_flag(data.as_deref())?;
+            folder::update(&context.client, folder_id, body).await
+        }
+        FolderAction::Delete { folder_id } => folder::delete(&context.client, folder_id).await,
+        FolderAction::Move { folder_id, data } => {
+            let body = commands::read_data_arg(data)?;
+            folder::move_folder(&context.client, folder_id, body).await
+        }
+        FolderAction::FromTemplate {
+            space_id,
+            template_id,
+            name,
+            data,
+        } => {
+            let mut body = commands::parse_data_flag(data.as_deref())?;
+            commands::merge_flag(&mut body, "name", Some(name.clone()));
+            folder::from_template(&context.client, space_id, template_id, body).await
         }
     }
 }
