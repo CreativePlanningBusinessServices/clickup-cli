@@ -4,14 +4,92 @@ pub mod folder;
 pub mod list;
 pub mod raw;
 pub mod space;
+pub mod task;
 pub mod workspace;
 
 use std::io::Read;
 
 use serde_json::{Value, json};
 
-use crate::client::CuResponse;
+use crate::client::{CuClient, CuResponse};
 use crate::error::CliError;
+
+/// Hard cap on pages `merge_task_pages` will fetch for a single `--all` request, so a
+/// misbehaving or unbounded endpoint can't loop forever.
+pub const MAX_PAGES: u32 = 1000;
+
+/// Shared task-list pagination for `task list`/`task filter` (Task 10) and `view tasks`
+/// (Task 16). Without `fetch_all`, issues a single request for `page` (defaulting to 0) and
+/// passes its body through unchanged. With `fetch_all`, loops `page = 0..`, merging each
+/// page's `"tasks"` array into one envelope: `{"items": [...], "count": n, "hasMore": bool}`.
+/// A page stops the loop when it's empty, or when `last_page: true` is present in the body
+/// (list-scoped task endpoints); endpoints that never send `last_page` (filtered/team-scoped
+/// task endpoints) instead stop once a page comes back with fewer than 100 items — ClickUp's
+/// fixed page size. Hitting `MAX_PAGES` without a natural stop truncates the loop and reports
+/// `hasMore: true` rather than fetching forever.
+pub async fn merge_task_pages(
+    client: &CuClient,
+    path: &str,
+    base_query: &[(String, String)],
+    page: Option<u64>,
+    fetch_all: bool,
+) -> Result<Value, CliError> {
+    if !fetch_all {
+        let mut query = base_query.to_vec();
+        query.push(("page".to_string(), page.unwrap_or(0).to_string()));
+        let response = client
+            .request(reqwest::Method::GET, path, &query, None)
+            .await?;
+        return Ok(pass_through(response));
+    }
+
+    let mut items: Vec<Value> = Vec::new();
+    let mut has_more = false;
+    for page_number in 0..u64::from(MAX_PAGES) {
+        let mut query = base_query.to_vec();
+        query.push(("page".to_string(), page_number.to_string()));
+        let response = client
+            .request(reqwest::Method::GET, path, &query, None)
+            .await?;
+        let body = pass_through(response);
+        let page_tasks = body["tasks"].as_array().cloned().unwrap_or_default();
+        let page_len = page_tasks.len();
+        items.extend(page_tasks);
+
+        if page_len == 0 {
+            break;
+        }
+        let is_last_page = body
+            .get("last_page")
+            .and_then(Value::as_bool)
+            .unwrap_or(page_len < 100);
+        if is_last_page {
+            break;
+        }
+        if page_number + 1 == u64::from(MAX_PAGES) {
+            has_more = true;
+        }
+    }
+
+    Ok(json!({"items": items, "count": items.len(), "hasMore": has_more}))
+}
+
+/// Query pairs for `--custom-id`: ClickUp requires `custom_task_ids=true` and `team_id`
+/// together to resolve a task by its custom id (e.g. `DEV-123`) instead of its ClickUp id.
+/// Returns an empty query when `custom_id` is false.
+pub fn custom_id_query(
+    client: &CuClient,
+    custom_id: bool,
+) -> Result<Vec<(String, String)>, CliError> {
+    if !custom_id {
+        return Ok(Vec::new());
+    }
+    let workspace_id = client.workspace_id()?;
+    Ok(vec![
+        ("custom_task_ids".to_string(), "true".to_string()),
+        ("team_id".to_string(), workspace_id.to_string()),
+    ])
+}
 
 /// Reads a `--data`-style argument: inline JSON, `@file` to read a file, or `-` for stdin.
 pub fn read_data_arg(data: &str) -> Result<Value, CliError> {

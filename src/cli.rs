@@ -4,7 +4,7 @@ use clap::{ArgGroup, Parser, Subcommand};
 use serde_json::Value;
 
 use crate::commands;
-use crate::commands::{account, config_cmd, folder, list, raw, space, workspace};
+use crate::commands::{account, config_cmd, folder, list, raw, space, task, workspace};
 use crate::context::{DEFAULT_BASE, context_for};
 use crate::error::CliError;
 use crate::output;
@@ -81,6 +81,11 @@ pub enum Command {
     List {
         #[command(subcommand)]
         action: ListAction,
+    },
+    /// Tasks: CRUD, list-scoped listing, and workspace-wide filtering
+    Task {
+        #[command(subcommand)]
+        action: TaskAction,
     },
 }
 
@@ -330,6 +335,131 @@ pub enum ListAction {
     RemoveTask { list_id: String, task_id: String },
 }
 
+#[derive(Subcommand)]
+pub enum TaskAction {
+    /// Create a task in a list
+    #[command(
+        after_help = "Example: clickup-cli task create 124 --name \"Fix login\"\n\n--data supplies fields --name doesn't cover; --name always wins if both set name."
+    )]
+    Create {
+        list_id: String,
+        #[arg(long)]
+        name: String,
+        /// Request body: inline JSON, @file, or - for stdin; merged under --name
+        #[arg(long)]
+        data: Option<String>,
+    },
+    /// Get a single task
+    #[command(
+        after_help = "Examples:\n  clickup-cli task get 868k5a5wa --subtasks --markdown\n  clickup-cli task get DEV-123 --custom-id\n\n--custom-id resolves task_id as a custom id (e.g. DEV-123) instead of a ClickUp id."
+    )]
+    Get {
+        task_id: String,
+        #[arg(long = "custom-id")]
+        custom_id: bool,
+        #[arg(long)]
+        subtasks: bool,
+        #[arg(long)]
+        markdown: bool,
+    },
+    /// Update a task
+    #[command(
+        after_help = "Example: clickup-cli task update 868k5a5wa --data '{\"status\":\"done\"}'"
+    )]
+    Update {
+        task_id: String,
+        #[arg(long = "custom-id")]
+        custom_id: bool,
+        #[arg(long)]
+        data: Option<String>,
+    },
+    /// Delete a task
+    #[command(after_help = "Example: clickup-cli task delete 868k5a5wa")]
+    Delete {
+        task_id: String,
+        #[arg(long = "custom-id")]
+        custom_id: bool,
+    },
+    /// List tasks in a list
+    #[command(
+        after_help = "Example: clickup-cli task list 124 --status \"in progress\" --all\n\n--all merges every page into one {items,count,hasMore} envelope; omit it to fetch a single --page (default 0)."
+    )]
+    List {
+        list_id: String,
+        #[arg(long)]
+        archived: bool,
+        #[arg(long = "include-closed")]
+        include_closed: bool,
+        #[arg(long)]
+        subtasks: bool,
+        #[arg(long)]
+        markdown: bool,
+        /// Repeatable; fans out to one statuses[] query pair per value
+        #[arg(long = "status")]
+        status: Vec<String>,
+        /// Repeatable; fans out to one assignees[] query pair per value
+        #[arg(long = "assignee")]
+        assignee: Vec<String>,
+        #[arg(long = "order-by")]
+        order_by: Option<String>,
+        #[arg(long)]
+        reverse: bool,
+        /// Repeatable key=value query parameter, passed through verbatim (date windows,
+        /// custom_fields JSON, etc.)
+        #[arg(long = "query")]
+        query: Vec<String>,
+        #[arg(long)]
+        page: Option<u64>,
+        /// Fetch and merge every page instead of just --page
+        #[arg(long)]
+        all: bool,
+    },
+    /// Filter tasks across the whole workspace
+    #[command(
+        after_help = "Example: clickup-cli task filter --assignee 75413867 --query due_date_lt=1735689600000 --all"
+    )]
+    Filter {
+        #[arg(long)]
+        archived: bool,
+        #[arg(long = "include-closed")]
+        include_closed: bool,
+        #[arg(long)]
+        subtasks: bool,
+        #[arg(long)]
+        markdown: bool,
+        /// Repeatable; fans out to one statuses[] query pair per value
+        #[arg(long = "status")]
+        status: Vec<String>,
+        /// Repeatable; fans out to one assignees[] query pair per value
+        #[arg(long = "assignee")]
+        assignee: Vec<String>,
+        /// Repeatable space id; fans out to one space_ids[] query pair per value
+        #[arg(long = "space")]
+        space: Vec<String>,
+        /// Repeatable folder id; fans out to one project_ids[] query pair per value
+        /// (ClickUp's filtered-tasks endpoint still calls folders "projects", its pre-Folder
+        /// legacy name)
+        #[arg(long = "folder")]
+        folder: Vec<String>,
+        /// Repeatable list id; fans out to one list_ids[] query pair per value
+        #[arg(long = "list")]
+        list: Vec<String>,
+        #[arg(long = "order-by")]
+        order_by: Option<String>,
+        #[arg(long)]
+        reverse: bool,
+        /// Repeatable key=value query parameter, passed through verbatim (date windows,
+        /// custom_fields JSON, etc.)
+        #[arg(long = "query")]
+        query: Vec<String>,
+        #[arg(long)]
+        page: Option<u64>,
+        /// Fetch and merge every page instead of just --page
+        #[arg(long)]
+        all: bool,
+    },
+}
+
 pub async fn cli_main() -> i32 {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -400,6 +530,7 @@ async fn dispatch(cli: &Cli) -> Result<Value, CliError> {
         Command::Space { action } => dispatch_space(cli, action).await,
         Command::Folder { action } => dispatch_folder(cli, action).await,
         Command::List { action } => dispatch_list(cli, action).await,
+        Command::Task { action } => dispatch_task(cli, action).await,
     }
 }
 
@@ -529,6 +660,108 @@ async fn dispatch_list(cli: &Cli, action: &ListAction) -> Result<Value, CliError
         }
         ListAction::RemoveTask { list_id, task_id } => {
             list::remove_task(&context.client, list_id, task_id).await
+        }
+    }
+}
+
+async fn dispatch_task(cli: &Cli, action: &TaskAction) -> Result<Value, CliError> {
+    let context = context_for(cli.account.as_deref(), cli.workspace.as_deref())?;
+    match action {
+        TaskAction::Create {
+            list_id,
+            name,
+            data,
+        } => {
+            let mut body = commands::parse_data_flag(data.as_deref())?;
+            commands::merge_flag(&mut body, "name", Some(name.clone()));
+            task::create(&context.client, list_id, body).await
+        }
+        TaskAction::Get {
+            task_id,
+            custom_id,
+            subtasks,
+            markdown,
+        } => task::get(&context.client, task_id, *custom_id, *subtasks, *markdown).await,
+        TaskAction::Update {
+            task_id,
+            custom_id,
+            data,
+        } => {
+            let body = commands::parse_data_flag(data.as_deref())?;
+            task::update(&context.client, task_id, *custom_id, body).await
+        }
+        TaskAction::Delete { task_id, custom_id } => {
+            task::delete(&context.client, task_id, *custom_id).await
+        }
+        TaskAction::List {
+            list_id,
+            archived,
+            include_closed,
+            subtasks,
+            markdown,
+            status,
+            assignee,
+            order_by,
+            reverse,
+            query,
+            page,
+            all,
+        } => {
+            let args = task::TaskListArgs {
+                archived: *archived,
+                include_closed: *include_closed,
+                subtasks: *subtasks,
+                markdown: *markdown,
+                statuses: status.clone(),
+                assignees: assignee.clone(),
+                order_by: order_by.clone(),
+                reverse: *reverse,
+                extra_query: query.clone(),
+            };
+            task::list(&context.client, list_id, &args, *page, *all).await
+        }
+        TaskAction::Filter {
+            archived,
+            include_closed,
+            subtasks,
+            markdown,
+            status,
+            assignee,
+            space,
+            folder,
+            list,
+            order_by,
+            reverse,
+            query,
+            page,
+            all,
+        } => {
+            let mut extra_query = query.clone();
+            extra_query.extend(
+                space
+                    .iter()
+                    .map(|space_id| format!("space_ids[]={space_id}")),
+            );
+            // ClickUp's filtered-team-tasks endpoint still calls folders "projects" — its
+            // pre-Folder legacy param name.
+            extra_query.extend(
+                folder
+                    .iter()
+                    .map(|folder_id| format!("project_ids[]={folder_id}")),
+            );
+            extra_query.extend(list.iter().map(|list_id| format!("list_ids[]={list_id}")));
+            let args = task::TaskListArgs {
+                archived: *archived,
+                include_closed: *include_closed,
+                subtasks: *subtasks,
+                markdown: *markdown,
+                statuses: status.clone(),
+                assignees: assignee.clone(),
+                order_by: order_by.clone(),
+                reverse: *reverse,
+                extra_query,
+            };
+            task::filter(&context.client, &args, *page, *all).await
         }
     }
 }
