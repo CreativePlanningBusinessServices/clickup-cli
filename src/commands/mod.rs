@@ -9,6 +9,7 @@ pub mod raw;
 pub mod space;
 pub mod tag;
 pub mod task;
+pub mod time;
 pub mod workspace;
 
 use std::io::Read;

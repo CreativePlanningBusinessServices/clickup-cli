@@ -7,7 +7,8 @@ use serde_json::Value;
 use crate::client::CuClient;
 use crate::commands;
 use crate::commands::{
-    account, checklist, comment, config_cmd, field, folder, list, raw, space, tag, task, workspace,
+    account, checklist, comment, config_cmd, field, folder, list, raw, space, tag, task, time,
+    workspace,
 };
 use crate::context::{DEFAULT_BASE, context_for};
 use crate::error::CliError;
@@ -110,6 +111,11 @@ pub enum Command {
     Tag {
         #[command(subcommand)]
         action: TagAction,
+    },
+    /// Time entries and the tags used on them
+    Time {
+        #[command(subcommand)]
+        action: TimeAction,
     },
 }
 
@@ -843,6 +849,140 @@ pub enum TagAction {
     Delete { space_id: String, tag_name: String },
 }
 
+#[derive(Subcommand)]
+pub enum TimeAction {
+    /// List time entries in a date window, optionally filtered by assignee/task/list/space/folder/billable
+    #[command(
+        after_help = "Example: clickup-cli time list --start-date 1735689600000 --end-date 1738368000000 --assignee 75413867\n\nNote: a negative \"duration\" on an entry in the response means that timer is still running."
+    )]
+    List {
+        #[arg(long = "start-date")]
+        start_date: Option<i64>,
+        #[arg(long = "end-date")]
+        end_date: Option<i64>,
+        #[arg(long)]
+        assignee: Option<String>,
+        #[arg(long = "task")]
+        task_id: Option<String>,
+        #[arg(long = "list")]
+        list_id: Option<String>,
+        #[arg(long = "space")]
+        space_id: Option<String>,
+        #[arg(long = "folder")]
+        folder_id: Option<String>,
+        #[arg(long)]
+        billable: Option<bool>,
+        #[arg(long = "include-task-tags")]
+        include_task_tags: bool,
+        #[arg(long = "include-location-names")]
+        include_location_names: bool,
+    },
+    /// Get a single time entry
+    #[command(after_help = "Example: clickup-cli time get 4190")]
+    Get { timer_id: String },
+    /// Create a time entry: --data needs "start" plus "duration" or "end" (validated by the API)
+    #[command(
+        after_help = "Example: clickup-cli time create --data '{\"start\":1735689600000,\"duration\":3600000,\"tid\":\"868k5a5wa\"}'\n\n--task/--description/--billable are convenience flags merged into --data as tid/description/billable."
+    )]
+    Create {
+        #[arg(long = "task")]
+        task: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        billable: Option<bool>,
+        #[arg(long)]
+        data: Option<String>,
+    },
+    /// Update a time entry
+    #[command(
+        after_help = "Example: clickup-cli time update 4190 --data '{\"description\":\"pairing\"}'"
+    )]
+    Update {
+        timer_id: String,
+        #[arg(long)]
+        data: Option<String>,
+    },
+    /// Delete a time entry
+    #[command(after_help = "Example: clickup-cli time delete 4190")]
+    Delete { timer_id: String },
+    /// A time entry's edit history
+    #[command(after_help = "Example: clickup-cli time history 4190")]
+    History { timer_id: String },
+    /// The currently running timer, if any
+    #[command(
+        after_help = "Example: clickup-cli time current --assignee 75413867\n\nNote: a negative \"duration\" in the response means the timer is running."
+    )]
+    Current {
+        #[arg(long)]
+        assignee: Option<String>,
+    },
+    /// Start a timer
+    #[command(
+        after_help = "Example: clickup-cli time start --data '{\"tid\":\"868k5a5wa\",\"description\":\"pairing\"}'\n\n--task/--description/--billable are convenience flags merged into --data as tid/description/billable."
+    )]
+    Start {
+        #[arg(long = "task")]
+        task: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        billable: Option<bool>,
+        #[arg(long)]
+        data: Option<String>,
+    },
+    /// Stop the currently running timer
+    #[command(after_help = "Example: clickup-cli time stop")]
+    Stop,
+    /// Manage tags used on time entries
+    Tag {
+        #[command(subcommand)]
+        action: TimeTagAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum TimeTagAction {
+    /// List tags used on time entries in the current workspace
+    #[command(after_help = "Example: clickup-cli time tag list")]
+    List,
+    /// Add tags to one or more time entries
+    #[command(
+        after_help = "Example: clickup-cli time tag add --entry 123 --entry 456 --tag billing"
+    )]
+    Add {
+        /// Repeatable; time entry id to tag
+        #[arg(long = "entry", required = true)]
+        entry: Vec<String>,
+        /// Repeatable; tag name to add
+        #[arg(long = "tag", required = true)]
+        tag: Vec<String>,
+    },
+    /// Remove tags from one or more time entries
+    #[command(after_help = "Example: clickup-cli time tag remove --entry 123 --tag billing")]
+    Remove {
+        /// Repeatable; time entry id to untag
+        #[arg(long = "entry", required = true)]
+        entry: Vec<String>,
+        /// Repeatable; tag name to remove
+        #[arg(long = "tag", required = true)]
+        tag: Vec<String>,
+    },
+    /// Rename a tag used on time entries
+    #[command(
+        after_help = "Example: clickup-cli time tag rename billing --new-name billable-work --fg '#ffffff' --bg '#00ff00'"
+    )]
+    Rename {
+        name: String,
+        #[arg(long = "new-name")]
+        new_name: String,
+        #[arg(long)]
+        fg: Option<String>,
+        #[arg(long)]
+        bg: Option<String>,
+    },
+}
+
 pub async fn cli_main() -> i32 {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -918,6 +1058,7 @@ async fn dispatch(cli: &Cli) -> Result<Value, CliError> {
         Command::Checklist { action } => dispatch_checklist(cli, action).await,
         Command::Field { action } => dispatch_field(cli, action).await,
         Command::Tag { action } => dispatch_tag(cli, action).await,
+        Command::Time { action } => dispatch_time(cli, action).await,
     }
 }
 
@@ -1447,6 +1588,86 @@ async fn dispatch_tag(cli: &Cli, action: &TagAction) -> Result<Value, CliError> 
     }
 }
 
+async fn dispatch_time(cli: &Cli, action: &TimeAction) -> Result<Value, CliError> {
+    let context = context_for(cli.account.as_deref(), cli.workspace.as_deref())?;
+    match action {
+        TimeAction::List {
+            start_date,
+            end_date,
+            assignee,
+            task_id,
+            list_id,
+            space_id,
+            folder_id,
+            billable,
+            include_task_tags,
+            include_location_names,
+        } => {
+            let args = time::TimeListArgs {
+                start_date: *start_date,
+                end_date: *end_date,
+                assignee: assignee.clone(),
+                task_id: task_id.clone(),
+                list_id: list_id.clone(),
+                space_id: space_id.clone(),
+                folder_id: folder_id.clone(),
+                billable: *billable,
+                include_task_tags: *include_task_tags,
+                include_location_names: *include_location_names,
+            };
+            time::list(&context.client, &args).await
+        }
+        TimeAction::Get { timer_id } => time::get(&context.client, timer_id).await,
+        TimeAction::Create {
+            task,
+            description,
+            billable,
+            data,
+        } => {
+            let data = commands::parse_data_flag(data.as_deref())?;
+            let body =
+                time::build_entry_body(data, task.as_deref(), description.as_deref(), *billable);
+            time::create(&context.client, body).await
+        }
+        TimeAction::Update { timer_id, data } => {
+            let body = commands::parse_data_flag(data.as_deref())?;
+            time::update(&context.client, timer_id, body).await
+        }
+        TimeAction::Delete { timer_id } => time::delete(&context.client, timer_id).await,
+        TimeAction::History { timer_id } => time::history(&context.client, timer_id).await,
+        TimeAction::Current { assignee } => {
+            time::current(&context.client, assignee.as_deref()).await
+        }
+        TimeAction::Start {
+            task,
+            description,
+            billable,
+            data,
+        } => {
+            let data = commands::parse_data_flag(data.as_deref())?;
+            let body =
+                time::build_entry_body(data, task.as_deref(), description.as_deref(), *billable);
+            time::start(&context.client, body).await
+        }
+        TimeAction::Stop => time::stop(&context.client).await,
+        TimeAction::Tag { action } => dispatch_time_tag(&context.client, action).await,
+    }
+}
+
+async fn dispatch_time_tag(client: &CuClient, action: &TimeTagAction) -> Result<Value, CliError> {
+    match action {
+        TimeTagAction::List => time::tags(client).await,
+        TimeTagAction::Add { entry, tag } => time::tag_add(client, entry, tag).await,
+        TimeTagAction::Remove { entry, tag } => time::tag_remove(client, entry, tag).await,
+        TimeTagAction::Rename {
+            name,
+            new_name,
+            fg,
+            bg,
+        } => time::tag_rename(client, name, new_name, fg.as_deref(), bg.as_deref()).await,
+    }
+}
+
 fn dispatch_config(action: &ConfigAction) -> Result<Value, CliError> {
     let config_path = crate::config::default_config_path()?;
     match action {
@@ -1784,5 +2005,42 @@ mod tests {
             "#ff0000",
         ])
         .expect("tag create should parse");
+    }
+
+    #[test]
+    fn time_start_parses_with_convenience_flags() {
+        Cli::try_parse_from([
+            "clickup-cli",
+            "time",
+            "start",
+            "--task",
+            "868k5a5wa",
+            "--description",
+            "pairing",
+            "--billable",
+            "true",
+        ])
+        .expect("time start should parse");
+    }
+
+    #[test]
+    fn time_stop_parses_with_no_args() {
+        Cli::try_parse_from(["clickup-cli", "time", "stop"]).expect("time stop should parse");
+    }
+
+    #[test]
+    fn time_tag_add_requires_entry_and_tag() {
+        expect_parse_error(&["clickup-cli", "time", "tag", "add"]);
+        Cli::try_parse_from([
+            "clickup-cli",
+            "time",
+            "tag",
+            "add",
+            "--entry",
+            "123",
+            "--tag",
+            "billing",
+        ])
+        .expect("time tag add with --entry and --tag should parse");
     }
 }
