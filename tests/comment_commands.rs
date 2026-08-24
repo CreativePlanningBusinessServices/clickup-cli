@@ -1,6 +1,6 @@
 mod common;
 
-use clickup_cli::commands::comment::{self, CommentLocation};
+use clickup_cli::commands::comment::{self, CommentLocation, build_create_body};
 use serde_json::{Value, json};
 use wiremock::matchers::{body_json, method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -53,6 +53,9 @@ async fn list_all_pages_with_start_and_start_id() {
     assert_eq!(result["items"].as_array().unwrap().len(), 28);
 }
 
+/// Drives `create` through `build_create_body` — the same merge function `dispatch_comment`
+/// calls in `cli.rs` — rather than a pre-merged body, so this test actually exercises the
+/// `--text`/`--notify-all` merge logic instead of just `create`'s passthrough-to-HTTP behavior.
 #[tokio::test]
 async fn create_merges_text_and_notify_flags() {
     let server = MockServer::start().await;
@@ -68,8 +71,8 @@ async fn create_merges_text_and_notify_flags() {
 
     let client = common::client_for(&server);
     let location = CommentLocation::Task("868k5a5wa");
-    let data = json!({"comment_text": "Deployed.", "notify_all": true});
-    let result = comment::create(&client, &location, false, data)
+    let body = build_create_body(json!({}), "Deployed.", true);
+    let result = comment::create(&client, &location, false, body)
         .await
         .unwrap();
     assert_eq!(result["id"], "456");

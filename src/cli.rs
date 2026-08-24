@@ -1202,11 +1202,8 @@ async fn dispatch_comment(cli: &Cli, action: &CommentAction) -> Result<Value, Cl
         } => {
             let location =
                 comment::location_from(task.as_deref(), list.as_deref(), view.as_deref())?;
-            let mut body = commands::parse_data_flag(data.as_deref())?;
-            commands::merge_flag(&mut body, "comment_text", Some(text.clone()));
-            if *notify_all {
-                commands::merge_flag(&mut body, "notify_all", Some(true));
-            }
+            let data = commands::parse_data_flag(data.as_deref())?;
+            let body = comment::build_create_body(data, text, *notify_all);
             comment::create(&context.client, &location, *custom_id, body).await
         }
         CommentAction::Update {
@@ -1215,9 +1212,8 @@ async fn dispatch_comment(cli: &Cli, action: &CommentAction) -> Result<Value, Cl
             resolved,
             data,
         } => {
-            let mut body = commands::parse_data_flag(data.as_deref())?;
-            commands::merge_flag(&mut body, "comment_text", text.clone());
-            commands::merge_flag(&mut body, "resolved", *resolved);
+            let data = commands::parse_data_flag(data.as_deref())?;
+            let body = comment::build_update_body(data, text.as_deref(), *resolved);
             comment::update(&context.client, comment_id, body).await
         }
         CommentAction::Delete { comment_id } => comment::delete(&context.client, comment_id).await,
@@ -1229,8 +1225,8 @@ async fn dispatch_comment(cli: &Cli, action: &CommentAction) -> Result<Value, Cl
             text,
             data,
         } => {
-            let mut body = commands::parse_data_flag(data.as_deref())?;
-            commands::merge_flag(&mut body, "comment_text", Some(text.clone()));
+            let data = commands::parse_data_flag(data.as_deref())?;
+            let body = comment::build_reply_body(data, text);
             comment::reply(&context.client, comment_id, body).await
         }
     }

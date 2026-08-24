@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 use crate::client::CuClient;
-use crate::commands::{MAX_PAGES, custom_id_query, pass_through};
+use crate::commands::{MAX_PAGES, custom_id_query, merge_flag, pass_through};
 use crate::error::CliError;
 
 /// Exactly one of `--task`/`--list`/`--view` (enforced by a clap `ArgGroup` on every CLI verb
@@ -103,6 +103,31 @@ pub async fn list(
     Ok(json!({"items": items, "count": items.len(), "hasMore": has_more}))
 }
 
+/// Builds the body `comment create` sends: `--text` always merges into `data["comment_text"]`;
+/// `--notify-all` merges `data["notify_all"] = true` only when the flag is actually passed, so
+/// a bare (unset) `--notify-all` can't clobber a `notify_all` value supplied via `--data`.
+pub fn build_create_body(mut data: Value, text: &str, notify_all: bool) -> Value {
+    merge_flag(&mut data, "comment_text", Some(text.to_string()));
+    if notify_all {
+        merge_flag(&mut data, "notify_all", Some(true));
+    }
+    data
+}
+
+/// Builds the body `comment update` sends: `--text`/`--resolved` merge into
+/// `data["comment_text"]`/`data["resolved"]` only when present.
+pub fn build_update_body(mut data: Value, text: Option<&str>, resolved: Option<bool>) -> Value {
+    merge_flag(&mut data, "comment_text", text.map(str::to_string));
+    merge_flag(&mut data, "resolved", resolved);
+    data
+}
+
+/// Builds the body `comment reply` sends: `--text` merges into `data["comment_text"]`.
+pub fn build_reply_body(mut data: Value, text: &str) -> Value {
+    merge_flag(&mut data, "comment_text", Some(text.to_string()));
+    data
+}
+
 pub async fn create(
     client: &CuClient,
     location: &CommentLocation<'_>,
@@ -171,5 +196,53 @@ mod tests {
             location_from(None, None, Some("v1")),
             Ok(CommentLocation::View("v1"))
         ));
+    }
+
+    #[test]
+    fn build_create_body_merges_text_and_sets_notify_all_true_when_flag_passed() {
+        let body = build_create_body(json!({}), "Deployed.", true);
+        assert_eq!(
+            body,
+            json!({"comment_text": "Deployed.", "notify_all": true})
+        );
+    }
+
+    #[test]
+    fn build_create_body_omits_notify_all_when_flag_absent() {
+        let body = build_create_body(json!({}), "Deployed.", false);
+        assert_eq!(body, json!({"comment_text": "Deployed."}));
+    }
+
+    #[test]
+    fn build_create_body_does_not_clobber_data_notify_all_when_flag_absent() {
+        // The `--notify-all` conditional (`if notify_all { merge_flag(...) }`) exists
+        // precisely so an unset flag can't overwrite a `notify_all` value already present in
+        // `--data` with `Some(false)`.
+        let body = build_create_body(json!({"notify_all": true}), "Deployed.", false);
+        assert_eq!(
+            body,
+            json!({"comment_text": "Deployed.", "notify_all": true})
+        );
+    }
+
+    #[test]
+    fn build_create_body_text_flag_overrides_data_comment_text() {
+        let body = build_create_body(json!({"comment_text": "from data"}), "from flag", false);
+        assert_eq!(body, json!({"comment_text": "from flag"}));
+    }
+
+    #[test]
+    fn build_update_body_merges_only_present_fields() {
+        let body = build_update_body(json!({}), Some("edited"), Some(true));
+        assert_eq!(body, json!({"comment_text": "edited", "resolved": true}));
+
+        let body = build_update_body(json!({"resolved": false}), None, None);
+        assert_eq!(body, json!({"resolved": false}));
+    }
+
+    #[test]
+    fn build_reply_body_merges_text() {
+        let body = build_reply_body(json!({}), "thanks");
+        assert_eq!(body, json!({"comment_text": "thanks"}));
     }
 }
