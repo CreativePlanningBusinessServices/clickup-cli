@@ -1,3 +1,3 @@
 fn main() {
-    println!("clickup-cli: scaffold — command surface not implemented yet");
+    // Replaced in Task 5 by: std::process::exit(clickup_cli::cli::cli_main().await)
 }
