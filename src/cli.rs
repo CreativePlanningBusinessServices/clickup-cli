@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::client::CuClient;
 use crate::commands;
-use crate::commands::{account, config_cmd, folder, list, raw, space, task, workspace};
+use crate::commands::{account, comment, config_cmd, folder, list, raw, space, task, workspace};
 use crate::context::{DEFAULT_BASE, context_for};
 use crate::error::CliError;
 use crate::output;
@@ -88,6 +88,11 @@ pub enum Command {
     Task {
         #[command(subcommand)]
         action: TaskAction,
+    },
+    /// Comments on a task, list, or view, and their replies
+    Comment {
+        #[command(subcommand)]
+        action: CommentAction,
     },
 }
 
@@ -605,6 +610,79 @@ pub enum TaskLinkAction {
     },
 }
 
+#[derive(Subcommand)]
+pub enum CommentAction {
+    /// List comments on a task, list, or view
+    #[command(
+        after_help = "Example: clickup-cli comment list --task 868k5a5wa --all\n\n--all merges every page into one {items,count,hasMore} envelope, following ClickUp's start/start_id cursor across pages; omit it to fetch just the first (newest) page.",
+        group(ArgGroup::new("comment_list_location").args(["task", "list", "view"]).required(true).multiple(false))
+    )]
+    List {
+        #[arg(long)]
+        task: Option<String>,
+        #[arg(long)]
+        list: Option<String>,
+        #[arg(long)]
+        view: Option<String>,
+        #[arg(long = "custom-id")]
+        custom_id: bool,
+        /// Fetch and merge every page instead of just the first
+        #[arg(long)]
+        all: bool,
+    },
+    /// Create a comment on a task, list, or view
+    #[command(
+        after_help = "Example: clickup-cli comment create --task 868k5a5wa --text \"Deployed.\" --notify-all\n\n--text merges into data[\"comment_text\"]; --notify-all merges into data[\"notify_all\"]. ClickUp requires an assignee on list comments and validates notify_all — the CLI passes those through as API errors.",
+        group(ArgGroup::new("comment_create_location").args(["task", "list", "view"]).required(true).multiple(false))
+    )]
+    Create {
+        #[arg(long)]
+        task: Option<String>,
+        #[arg(long)]
+        list: Option<String>,
+        #[arg(long)]
+        view: Option<String>,
+        #[arg(long)]
+        text: String,
+        #[arg(long = "notify-all")]
+        notify_all: bool,
+        /// Request body: inline JSON, @file, or - for stdin; merged under --text/--notify-all
+        #[arg(long)]
+        data: Option<String>,
+        #[arg(long = "custom-id")]
+        custom_id: bool,
+    },
+    /// Update a comment
+    #[command(
+        after_help = "Example: clickup-cli comment update 456 --text \"edited\" --resolved true"
+    )]
+    Update {
+        comment_id: String,
+        #[arg(long)]
+        text: Option<String>,
+        #[arg(long)]
+        resolved: Option<bool>,
+        #[arg(long)]
+        data: Option<String>,
+    },
+    /// Delete a comment
+    #[command(after_help = "Example: clickup-cli comment delete 456")]
+    Delete { comment_id: String },
+    /// List a comment's threaded replies
+    #[command(after_help = "Example: clickup-cli comment replies 456")]
+    Replies { comment_id: String },
+    /// Reply to a comment
+    #[command(after_help = "Example: clickup-cli comment reply 456 --text \"thanks\"")]
+    Reply {
+        comment_id: String,
+        #[arg(long)]
+        text: String,
+        /// Request body: inline JSON, @file, or - for stdin; merged under --text
+        #[arg(long)]
+        data: Option<String>,
+    },
+}
+
 pub async fn cli_main() -> i32 {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -676,6 +754,7 @@ async fn dispatch(cli: &Cli) -> Result<Value, CliError> {
         Command::Folder { action } => dispatch_folder(cli, action).await,
         Command::List { action } => dispatch_list(cli, action).await,
         Command::Task { action } => dispatch_task(cli, action).await,
+        Command::Comment { action } => dispatch_comment(cli, action).await,
     }
 }
 
@@ -1021,6 +1100,65 @@ async fn dispatch_task_link(client: &CuClient, action: &TaskLinkAction) -> Resul
     }
 }
 
+async fn dispatch_comment(cli: &Cli, action: &CommentAction) -> Result<Value, CliError> {
+    let context = context_for(cli.account.as_deref(), cli.workspace.as_deref())?;
+    match action {
+        CommentAction::List {
+            task,
+            list,
+            view,
+            custom_id,
+            all,
+        } => {
+            let location =
+                comment::location_from(task.as_deref(), list.as_deref(), view.as_deref())?;
+            comment::list(&context.client, &location, *custom_id, *all).await
+        }
+        CommentAction::Create {
+            task,
+            list,
+            view,
+            text,
+            notify_all,
+            data,
+            custom_id,
+        } => {
+            let location =
+                comment::location_from(task.as_deref(), list.as_deref(), view.as_deref())?;
+            let mut body = commands::parse_data_flag(data.as_deref())?;
+            commands::merge_flag(&mut body, "comment_text", Some(text.clone()));
+            if *notify_all {
+                commands::merge_flag(&mut body, "notify_all", Some(true));
+            }
+            comment::create(&context.client, &location, *custom_id, body).await
+        }
+        CommentAction::Update {
+            comment_id,
+            text,
+            resolved,
+            data,
+        } => {
+            let mut body = commands::parse_data_flag(data.as_deref())?;
+            commands::merge_flag(&mut body, "comment_text", text.clone());
+            commands::merge_flag(&mut body, "resolved", *resolved);
+            comment::update(&context.client, comment_id, body).await
+        }
+        CommentAction::Delete { comment_id } => comment::delete(&context.client, comment_id).await,
+        CommentAction::Replies { comment_id } => {
+            comment::replies(&context.client, comment_id).await
+        }
+        CommentAction::Reply {
+            comment_id,
+            text,
+            data,
+        } => {
+            let mut body = commands::parse_data_flag(data.as_deref())?;
+            commands::merge_flag(&mut body, "comment_text", Some(text.clone()));
+            comment::reply(&context.client, comment_id, body).await
+        }
+    }
+}
+
 fn dispatch_config(action: &ConfigAction) -> Result<Value, CliError> {
     let config_path = crate::config::default_config_path()?;
     match action {
@@ -1218,6 +1356,31 @@ mod tests {
             "--name",
             "Sprint 12",
         ]);
+    }
+
+    #[test]
+    fn comment_list_requires_exactly_one_location() {
+        expect_parse_error(&["clickup-cli", "comment", "list"]);
+        expect_parse_error(&[
+            "clickup-cli",
+            "comment",
+            "list",
+            "--task",
+            "868k5a5wa",
+            "--list",
+            "124",
+        ]);
+    }
+
+    #[test]
+    fn comment_list_with_exactly_one_location_parses() {
+        Cli::try_parse_from(["clickup-cli", "comment", "list", "--view", "vw1", "--all"])
+            .expect("--view alone should parse");
+    }
+
+    #[test]
+    fn comment_create_requires_text() {
+        expect_parse_error(&["clickup-cli", "comment", "create", "--task", "868k5a5wa"]);
     }
 
     #[test]

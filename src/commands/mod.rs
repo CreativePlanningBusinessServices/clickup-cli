@@ -1,4 +1,5 @@
 pub mod account;
+pub mod comment;
 pub mod config_cmd;
 pub mod folder;
 pub mod list;
