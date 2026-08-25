@@ -28,39 +28,87 @@ pub fn authorize_url(client_id: &str, redirect_uri: &str, state: &str) -> String
     )
 }
 
-/// Binds the loopback listener up front so a busy port fails before the browser opens.
+/// The OAuth redirect listener. `redirect_uri` says `localhost`, which dual-stack
+/// browsers may resolve to either `127.0.0.1` or `::1` — so both loopbacks are bound
+/// on the same port (IPv6 best-effort: some hosts have it disabled).
+pub struct LoopbackListeners {
+    ipv4: TcpListener,
+    ipv6: Option<TcpListener>,
+}
+
+impl LoopbackListeners {
+    pub fn port(&self) -> u16 {
+        self.ipv4
+            .local_addr()
+            .map(|address| address.port())
+            .unwrap_or_default()
+    }
+
+    pub fn has_ipv6(&self) -> bool {
+        self.ipv6.is_some()
+    }
+}
+
+/// Binds the loopback listeners up front so a busy port fails before the browser opens.
 /// Port 0 asks the OS for any free port (used by tests).
-pub fn bind_loopback(port: u16) -> Result<TcpListener, CliError> {
-    let listener = TcpListener::bind(("127.0.0.1", port)).map_err(|bind_error| {
+pub fn bind_loopback(port: u16) -> Result<LoopbackListeners, CliError> {
+    let ipv4 = TcpListener::bind(("127.0.0.1", port)).map_err(|bind_error| {
         CliError::Usage(format!(
             "cannot listen on 127.0.0.1:{port} ({bind_error}) — pass a different --port or use --paste"
         ))
     })?;
-    listener
-        .set_nonblocking(true)
-        .map_err(|nonblocking_error| {
-            CliError::Network(format!(
-                "configuring the OAuth listener failed: {nonblocking_error}"
-            ))
-        })?;
-    Ok(listener)
+    let chosen_port = ipv4
+        .local_addr()
+        .map(|address| address.port())
+        .unwrap_or(port);
+    set_nonblocking(&ipv4)?;
+    // Best-effort: an IPv6-less host still works over IPv4; a browser that picks ::1 on
+    // a host where this bind failed will surface as the redirect timeout.
+    let ipv6 = TcpListener::bind(("::1", chosen_port)).ok();
+    if let Some(listener) = &ipv6 {
+        set_nonblocking(listener)?;
+    }
+    Ok(LoopbackListeners { ipv4, ipv6 })
+}
+
+fn set_nonblocking(listener: &TcpListener) -> Result<(), CliError> {
+    listener.set_nonblocking(true).map_err(|nonblocking_error| {
+        CliError::Network(format!(
+            "configuring the OAuth listener failed: {nonblocking_error}"
+        ))
+    })
 }
 
 /// Waits for ClickUp's browser redirect and returns the authorization code. A request
 /// whose `state` doesn't match is answered 400 and treated as a possible interception —
 /// the whole login is aborted rather than kept open for a second attempt.
 pub async fn catch_redirect(
-    listener: TcpListener,
+    listeners: LoopbackListeners,
     expected_state: &str,
     deadline: Duration,
 ) -> Result<String, CliError> {
-    let listener = tokio::net::TcpListener::from_std(listener).map_err(|convert_error| {
+    let ipv4 = tokio::net::TcpListener::from_std(listeners.ipv4).map_err(|convert_error| {
         CliError::Network(format!("OAuth listener setup failed: {convert_error}"))
     })?;
+    let ipv6 = match listeners.ipv6 {
+        Some(listener) => Some(tokio::net::TcpListener::from_std(listener).map_err(
+            |convert_error| {
+                CliError::Network(format!("OAuth listener setup failed: {convert_error}"))
+            },
+        )?),
+        None => None,
+    };
 
     let wait_for_code = async {
         loop {
-            let (mut connection, _peer) = listener.accept().await.map_err(|accept_error| {
+            let accepted = match &ipv6 {
+                Some(ipv6_listener) => tokio::select! {
+                    ipv4_accept = ipv4.accept() => ipv4_accept,
+                    ipv6_accept = ipv6_listener.accept() => ipv6_accept,
+                },
+                None => ipv4.accept().await,
+            };
+            let (mut connection, _peer) = accepted.map_err(|accept_error| {
                 CliError::Network(format!("OAuth listener accept failed: {accept_error}"))
             })?;
 
@@ -73,6 +121,19 @@ pub async fn catch_redirect(
                 respond(&mut connection, 404, "Not the OAuth redirect.").await;
                 continue;
             };
+            // ClickUp reports a cancelled/denied authorization as an error redirect;
+            // fail fast instead of sitting out the deadline.
+            if let Some(denial) = query_param(query, "error") {
+                respond(
+                    &mut connection,
+                    200,
+                    "Authorization was not granted. You can close this tab.",
+                )
+                .await;
+                return Err(CliError::Auth(format!(
+                    "ClickUp reported '{denial}' — the authorization was not granted"
+                )));
+            }
             let code = query_param(query, "code");
             let state = query_param(query, "state");
             if code.is_none() {

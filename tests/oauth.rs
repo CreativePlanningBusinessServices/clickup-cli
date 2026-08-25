@@ -70,7 +70,7 @@ async fn exchange_code_maps_clickup_error_bodies() {
 #[tokio::test]
 async fn catch_redirect_returns_the_code_for_a_matching_state() {
     let listener = oauth::bind_loopback(0).unwrap(); // port 0 = any free port
-    let port = listener.local_addr().unwrap().port();
+    let port = listener.port();
     let redirect = tokio::spawn(async move {
         oauth::catch_redirect(listener, "state-xyz", Duration::from_secs(5)).await
     });
@@ -93,7 +93,7 @@ async fn catch_redirect_returns_the_code_for_a_matching_state() {
 #[tokio::test]
 async fn catch_redirect_rejects_a_mismatched_state() {
     let listener = oauth::bind_loopback(0).unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let port = listener.port();
     let redirect = tokio::spawn(async move {
         oauth::catch_redirect(listener, "state-xyz", Duration::from_secs(5)).await
     });
@@ -117,4 +117,51 @@ async fn catch_redirect_times_out() {
         .await
         .unwrap_err();
     assert!(matches!(error, clickup_cli::error::CliError::Network(_)));
+}
+
+#[tokio::test]
+async fn catch_redirect_fails_fast_when_authorization_is_denied() {
+    let listener = oauth::bind_loopback(0).unwrap();
+    let port = listener.port();
+    let redirect = tokio::spawn(async move {
+        oauth::catch_redirect(listener, "state-xyz", Duration::from_secs(5)).await
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let response = reqwest::get(format!(
+        "http://127.0.0.1:{port}/?error=access_denied&state=state-xyz"
+    ))
+    .await
+    .unwrap();
+    assert!(response.status().is_success());
+
+    let error = redirect.await.unwrap().unwrap_err();
+    match error {
+        clickup_cli::error::CliError::Auth(message) => {
+            assert!(message.contains("access_denied"), "got: {message}");
+        }
+        other => panic!("expected an auth error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn catch_redirect_accepts_ipv6_localhost_connections() {
+    let listener = oauth::bind_loopback(0).unwrap();
+    if !listener.has_ipv6() {
+        // Host without an IPv6 loopback — nothing to verify here.
+        return;
+    }
+    let port = listener.port();
+    let redirect = tokio::spawn(async move {
+        oauth::catch_redirect(listener, "state-xyz", Duration::from_secs(5)).await
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let response = reqwest::get(format!("http://[::1]:{port}/?code=v6-code&state=state-xyz"))
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+
+    let code = redirect.await.unwrap().unwrap();
+    assert_eq!(code, "v6-code");
 }
