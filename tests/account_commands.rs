@@ -285,3 +285,123 @@ async fn test_command_hits_get_user() {
     assert_eq!(result["alias"], "work");
     assert_eq!(result["user"]["id"], 183);
 }
+
+#[tokio::test]
+async fn oauth_add_validates_with_bearer_and_stores_oauth_secrets() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/user"))
+        .and(header("Authorization", "Bearer fresh_token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "user": {"id": 75413867, "username": "Jon Lamb"}
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/team"))
+        .and(header("Authorization", "Bearer fresh_token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "teams": [{"id": "14142316", "name": "Creative Planning"}]
+        })))
+        .mount(&server)
+        .await;
+
+    let config_dir = tempfile::tempdir().unwrap();
+    let config_path = config_dir.path().join("config.toml");
+    let store = MemoryStore::default();
+
+    let result = account::finish_oauth_add(
+        &config_path,
+        &store,
+        &server.uri(),
+        "cp",
+        "ABC123".to_string(),
+        "shh".to_string(),
+        "fresh_token".to_string(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["workspace"]["id"], "14142316");
+    let config = Config::load(&config_path).unwrap();
+    assert_eq!(config.accounts["cp"].workspace_id, "14142316");
+    match store.get("cp").unwrap().expect("secrets stored") {
+        AccountSecrets::OAuth {
+            client_id,
+            client_secret,
+            access_token,
+        } => {
+            assert_eq!(client_id, "ABC123");
+            assert_eq!(client_secret, "shh");
+            assert_eq!(access_token, "fresh_token");
+        }
+        other => panic!("expected oauth secrets, got {other:?}"),
+    }
+}
+
+#[test]
+fn oauth_login_replaces_only_the_access_token() {
+    let store = MemoryStore::default();
+    store
+        .set(
+            "cp",
+            &AccountSecrets::OAuth {
+                client_id: "ABC123".into(),
+                client_secret: "shh".into(),
+                access_token: "stale".into(),
+            },
+        )
+        .unwrap();
+
+    account::store_refreshed_token(&store, "cp", "newer_token".to_string()).unwrap();
+
+    match store.get("cp").unwrap().unwrap() {
+        AccountSecrets::OAuth {
+            client_id,
+            client_secret,
+            access_token,
+        } => {
+            assert_eq!(client_id, "ABC123");
+            assert_eq!(client_secret, "shh");
+            assert_eq!(access_token, "newer_token");
+        }
+        other => panic!("expected oauth secrets, got {other:?}"),
+    }
+}
+
+#[test]
+fn oauth_login_on_a_personal_token_account_is_a_usage_error() {
+    let store = MemoryStore::default();
+    store
+        .set(
+            "work",
+            &AccountSecrets::Token {
+                token: "pk_test".into(),
+            },
+        )
+        .unwrap();
+
+    let error = account::oauth_client_credentials(&store, "work").unwrap_err();
+    assert!(matches!(error, clickup_cli::error::CliError::Usage(_)));
+}
+
+#[test]
+fn oauth_client_credentials_returns_the_stored_pair() {
+    let store = MemoryStore::default();
+    store
+        .set(
+            "cp",
+            &AccountSecrets::OAuth {
+                client_id: "ABC123".into(),
+                client_secret: "shh".into(),
+                access_token: "stale".into(),
+            },
+        )
+        .unwrap();
+
+    let (client_id, client_secret) = account::oauth_client_credentials(&store, "cp").unwrap();
+    assert_eq!(client_id, "ABC123");
+    assert_eq!(client_secret, "shh");
+}

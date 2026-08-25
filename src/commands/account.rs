@@ -16,9 +16,99 @@ pub async fn add(
     token: String,
     workspace_id_flag: Option<String>,
 ) -> Result<Value, CliError> {
+    let auth_header = token.clone();
+    finish_add(
+        config_path,
+        store,
+        base,
+        alias,
+        auth_header,
+        AccountSecrets::Token { token },
+        workspace_id_flag,
+    )
+    .await
+}
+
+/// OAuth variant of `add`: the browser/exchange steps live in the dispatcher; this
+/// testable half validates the exchanged token, picks the workspace, and persists.
+#[allow(clippy::too_many_arguments)]
+pub async fn finish_oauth_add(
+    config_path: &Path,
+    store: &dyn SecretStore,
+    base: &str,
+    alias: &str,
+    client_id: String,
+    client_secret: String,
+    access_token: String,
+    workspace_id_flag: Option<String>,
+) -> Result<Value, CliError> {
+    let auth_header = format!("Bearer {access_token}");
+    finish_add(
+        config_path,
+        store,
+        base,
+        alias,
+        auth_header,
+        AccountSecrets::OAuth {
+            client_id,
+            client_secret,
+            access_token,
+        },
+        workspace_id_flag,
+    )
+    .await
+}
+
+/// Returns the stored OAuth client id/secret so `account login` can re-run the browser
+/// flow. A personal-token account is a usage error — there is nothing to re-authorize.
+pub fn oauth_client_credentials(
+    store: &dyn SecretStore,
+    alias: &str,
+) -> Result<(String, String), CliError> {
+    match store.get(alias)? {
+        Some(AccountSecrets::OAuth {
+            client_id,
+            client_secret,
+            ..
+        }) => Ok((client_id, client_secret)),
+        Some(AccountSecrets::Token { .. }) => Err(CliError::Usage(format!(
+            "'{alias}' uses a personal token — `account login` only applies to oauth accounts; re-run `clickup-cli account add {alias}` instead"
+        ))),
+        None => Err(CliError::Auth(format!(
+            "no credentials stored for '{alias}' — run `clickup-cli account add {alias}`"
+        ))),
+    }
+}
+
+/// Replaces only the access token on an oauth account, keeping the client credentials.
+pub fn store_refreshed_token(
+    store: &dyn SecretStore,
+    alias: &str,
+    new_access_token: String,
+) -> Result<(), CliError> {
+    let (client_id, client_secret) = oauth_client_credentials(store, alias)?;
+    store.set(
+        alias,
+        &AccountSecrets::OAuth {
+            client_id,
+            client_secret,
+            access_token: new_access_token,
+        },
+    )
+}
+
+async fn finish_add(
+    config_path: &Path,
+    store: &dyn SecretStore,
+    base: &str,
+    alias: &str,
+    auth_header: String,
+    secrets: AccountSecrets,
+    workspace_id_flag: Option<String>,
+) -> Result<Value, CliError> {
     // No workspace id yet — that's exactly what this call is figuring out — so the
     // validation client is built without one.
-    let client = CuClient::new(base.to_string(), token.clone(), None);
+    let client = CuClient::new(base.to_string(), auth_header, None);
 
     let user_response = client
         .request(reqwest::Method::GET, "/api/v2/user", &[], None)
@@ -62,7 +152,7 @@ pub async fn add(
     }
     config.save(config_path)?;
 
-    store.set(alias, &AccountSecrets::Token { token })?;
+    store.set(alias, &secrets)?;
 
     Ok(json!({
         "ok": true,
