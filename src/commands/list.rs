@@ -47,12 +47,14 @@ pub async fn update(client: &CuClient, list_id: &str, data: Value) -> Result<Val
     Ok(pass_through(response))
 }
 
+/// ClickUp's delete returns 204 with no body; synthesize an acknowledgement instead of
+/// surfacing the bare status code.
 pub async fn delete(client: &CuClient, list_id: &str) -> Result<Value, CliError> {
     let path = format!("/api/v2/list/{list_id}");
-    let response = client
+    client
         .request(reqwest::Method::DELETE, &path, &[], None)
         .await?;
-    Ok(pass_through(response))
+    Ok(json!({"deleted": true, "id": list_id}))
 }
 
 pub async fn members(client: &CuClient, list_id: &str) -> Result<Value, CliError> {

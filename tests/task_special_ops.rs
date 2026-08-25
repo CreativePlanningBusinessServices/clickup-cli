@@ -139,6 +139,82 @@ async fn attach_uploads_multipart_field_named_attachment() {
     assert!(String::from_utf8_lossy(&request.body).contains("name=\"attachment\""));
 }
 
+/// Tag names can contain spaces (e.g. "high priority") or a `/`; `tag add`/`tag remove` must
+/// percent-encode the name before splicing it into the URL path.
+#[tokio::test]
+async fn tag_add_hits_encoded_name_path() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/task/abc123/tag/high%20priority"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"tag": "high priority"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let result = task::tag_add(
+        &common::client_for(&server),
+        "abc123",
+        "high priority",
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["tag"], "high priority");
+}
+
+#[tokio::test]
+async fn tag_add_encodes_a_slash_in_the_tag_name() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/task/abc123/tag/a%2Fb"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"tag": "a/b"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let result = task::tag_add(&common::client_for(&server), "abc123", "a/b", false)
+        .await
+        .unwrap();
+    assert_eq!(result["tag"], "a/b");
+}
+
+#[tokio::test]
+async fn tag_remove_hits_encoded_name_path() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/v2/task/abc123/tag/high%20priority"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let result = task::tag_remove(
+        &common::client_for(&server),
+        "abc123",
+        "high priority",
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result, json!({"status": 204}));
+}
+
+#[tokio::test]
+async fn tag_remove_encodes_a_slash_in_the_tag_name() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/v2/task/abc123/tag/a%2Fb"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let result = task::tag_remove(&common::client_for(&server), "abc123", "a/b", false)
+        .await
+        .unwrap();
+    assert_eq!(result, json!({"status": 204}));
+}
+
 #[tokio::test]
 async fn attachments_all_follows_next_cursor() {
     let server = MockServer::start().await;

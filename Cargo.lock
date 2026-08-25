@@ -261,7 +261,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "toml",
- "url",
  "wiremock",
 ]
 

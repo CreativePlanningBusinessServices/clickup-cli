@@ -60,6 +60,7 @@ default workspace unless overridden with the global `--workspace <id>`.
 | Tasks across the whole workspace | `clickup-cli task filter --assignee ... --all` |
 | Move/merge a task, or seed one from a template | `clickup-cli task move\|merge\|from-template` |
 | Tag/dependency/link a task, attach a file | `clickup-cli task tag\|dependency\|link\|attach\|attachments` |
+| A task's assigned members, or time spent in each status | `clickup-cli task members\|time-in-status` |
 | Comments on a task, list, or view | `clickup-cli comment list\|create\|update\|delete\|replies\|reply` |
 | Checklists and their items | `clickup-cli checklist create\|update\|delete`, `checklist item add\|update\|remove` |
 | Custom fields and their per-task values | `clickup-cli field list\|set\|remove` |
@@ -91,8 +92,15 @@ Add `--pretty` for human-readable indented JSON.
 | 0 | — | Success. |
 | 1 | api | ClickUp returned an error. Read `message` (and `ecode` if present) from the JSON on stderr. |
 | 2 | usage | Bad flags/arguments — fix the invocation. |
-| 3 | auth | Token missing or rejected. Run `clickup-cli account test`; re-add the account if the token was revoked. |
+| 3 | auth | Token missing or rejected (401 only — see below). Run `clickup-cli account test`; re-add the account if the token was revoked. |
 | 4 | network | Transport failure after retries already happened (the CLI retries 429s automatically) — the failure is real, not a rate limit to retry again. |
+
+A 429 that survives all retry attempts still surfaces as exit 1 (`kind: "api"`, `status: 429`) —
+exit 4 is reserved for a *transport*-level failure (connection refused, DNS, timeout) after
+retries, never for an HTTP response ClickUp actually sent back. And only a 401 maps to exit
+3/`auth`; a 403 (forbidden) surfaces as exit 1/`api` like any other HTTP error — a deliberate
+deviation from the spec's "401/403 → auth" wording, since a 403 usually means the token is valid
+but lacks permission for that specific resource, not that the token itself is bad.
 
 ### Pagination
 

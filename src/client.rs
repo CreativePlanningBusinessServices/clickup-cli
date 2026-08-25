@@ -6,6 +6,8 @@ use crate::error::CliError;
 
 const MAX_ATTEMPTS: u32 = 4;
 const BASE_BACKOFF_MILLIS: u64 = 500;
+/// Longest Retry-After delay we'll honor, so a hostile or buggy header can't hang the CLI.
+const MAX_RETRY_AFTER_SECS: u64 = 60;
 /// Longest raw response body we'll echo back in an error message.
 const MAX_BODY_ECHO_CHARS: usize = 500;
 
@@ -144,8 +146,10 @@ impl CuClient {
                 return Err(auth_error(status, &raw));
             }
             if (status.as_u16() == 429 || status.is_server_error()) && attempt < MAX_ATTEMPTS {
+                // A hostile or buggy Retry-After header (e.g. an hours-long value) must not be
+                // allowed to hang the CLI — cap the honored delay at MAX_RETRY_AFTER_SECS.
                 let delay = retry_after_seconds(&response)
-                    .map(Duration::from_secs)
+                    .map(|seconds| Duration::from_secs(seconds.min(MAX_RETRY_AFTER_SECS)))
                     .unwrap_or_else(|| backoff_delay(attempt));
                 tokio::time::sleep(delay).await;
                 continue;

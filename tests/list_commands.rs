@@ -162,7 +162,7 @@ async fn update_puts_to_list_path() {
 }
 
 #[tokio::test]
-async fn delete_hits_list_path() {
+async fn delete_synthesizes_ack_on_empty_body() {
     let server = MockServer::start().await;
     Mock::given(method("DELETE"))
         .and(path("/api/v2/list/124"))
@@ -173,5 +173,5 @@ async fn delete_hits_list_path() {
     let result = list::delete(&common::client_for(&server), "124")
         .await
         .unwrap();
-    assert_eq!(result, json!({"status": 204}));
+    assert_eq!(result, json!({"deleted": true, "id": "124"}));
 }

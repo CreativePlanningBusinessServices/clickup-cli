@@ -4,7 +4,8 @@ use serde_json::{Value, json};
 
 use crate::client::CuClient;
 use crate::commands::{
-    custom_id_query, merge_cursor_pages, merge_flag, merge_task_pages, pass_through,
+    custom_id_query, encode_path_segment, merge_cursor_pages, merge_flag, merge_task_pages,
+    pass_through,
 };
 use crate::error::CliError;
 
@@ -204,13 +205,20 @@ pub async fn time_in_status(
     Ok(pass_through(response))
 }
 
+/// `tag_name` is free text (it can contain spaces or a `/`) interpolated into the URL path, so
+/// it's percent-encoded first — `client.rs`'s `resolve_url` does no escaping of its own, and a
+/// raw space or `/` here would otherwise malform or misdirect the request. Mirrors
+/// `tag::encode_tag_name`/`chat::unreact`.
 pub async fn tag_add(
     client: &CuClient,
     task_id: &str,
     tag_name: &str,
     custom_id: bool,
 ) -> Result<Value, CliError> {
-    let path = format!("/api/v2/task/{task_id}/tag/{tag_name}");
+    let path = format!(
+        "/api/v2/task/{task_id}/tag/{}",
+        encode_path_segment(tag_name)
+    );
     let query = custom_id_query(client, custom_id)?;
     let response = client
         .request(reqwest::Method::POST, &path, &query, None)
@@ -218,13 +226,17 @@ pub async fn tag_add(
     Ok(pass_through(response))
 }
 
+/// See `tag_add` on why `tag_name` is percent-encoded before it's spliced into the path.
 pub async fn tag_remove(
     client: &CuClient,
     task_id: &str,
     tag_name: &str,
     custom_id: bool,
 ) -> Result<Value, CliError> {
-    let path = format!("/api/v2/task/{task_id}/tag/{tag_name}");
+    let path = format!(
+        "/api/v2/task/{task_id}/tag/{}",
+        encode_path_segment(tag_name)
+    );
     let query = custom_id_query(client, custom_id)?;
     let response = client
         .request(reqwest::Method::DELETE, &path, &query, None)

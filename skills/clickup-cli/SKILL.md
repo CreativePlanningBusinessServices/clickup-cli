@@ -29,6 +29,7 @@ unless overridden with the global `--workspace <id>`. Custom task ids (e.g. `DEV
 | Tasks across the whole workspace | `clickup-cli task filter --assignee ... --all` |
 | Move/merge a task, or seed one from a template | `clickup-cli task move\|merge\|from-template` |
 | Tag/dependency/link a task, attach a file | `clickup-cli task tag\|dependency\|link\|attach\|attachments` |
+| A task's assigned members, or time spent in each status | `clickup-cli task members\|time-in-status` |
 | Comments on a task, list, or view | `clickup-cli comment list\|create\|update\|delete\|replies\|reply` |
 | Checklists and their items | `clickup-cli checklist create\|update\|delete`, `checklist item add\|update\|remove` |
 | Custom fields and their per-task values | `clickup-cli field list\|set\|remove` |
@@ -78,8 +79,16 @@ First account added becomes the default; select others with `--account <alias>` 
 | 0 | success | — |
 | 1 | api | Read `message` (and `ecode` if present) from the JSON on stderr; fix the request. |
 | 2 | usage | Bad flags/arguments — fix the invocation. |
-| 3 | auth | Token rejected or missing. Rerun `clickup-cli account add`. |
+| 3 | auth | Token rejected or missing (401 only — see below). Rerun `clickup-cli account add`. |
 | 4 | network | Transport failure after retries already happened — the failure is real, not a rate limit to retry again. |
+
+A 429 that survives all retry attempts still surfaces as exit 1 (`kind: "api"`, `status: 429`) —
+the retry loop only produces exit 4 for a *transport*-level failure (connection refused, DNS,
+timeout) after retries, never for an HTTP response ClickUp actually sent back. And only a 401
+maps to exit 3/`auth`; a 403 (forbidden) surfaces as exit 1/`api` like any other HTTP error —
+a deliberate deviation from the spec's "401/403 → auth" wording, since a 403 usually means the
+token is valid but lacks permission for that specific resource, not that the token itself is
+bad.
 
 ## Gotchas
 
@@ -92,8 +101,9 @@ First account added becomes the default; select others with `--account <alias>` 
 - Comment listing is newest-first, 25 per page.
 - A NEGATIVE `duration` on a time entry (in `list`/`get`/`current` responses) means that timer
   is currently running.
-- Rate limit is 100 requests/min on most plans; the CLI retries 429s automatically — exit 4 means
-  the retries already happened and the failure is real.
+- Rate limit is 100 requests/min on most plans; the CLI retries 429s automatically — a 429 that
+  still comes back after retries surfaces as exit 1/`api` (see the exit code table above), not
+  exit 4.
 - `field set --value` accepts a bare word as a plain string; no need to double-quote simple
   values like `urgent`.
 - Tag and reaction names with spaces or reserved characters are percent-encoded into the URL path

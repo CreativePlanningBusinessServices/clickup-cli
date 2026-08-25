@@ -89,12 +89,14 @@ pub async fn list(
         let Some(last_comment) = last_comment else {
             break;
         };
-        let date = last_comment["date"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string();
-        let id = last_comment["id"].as_str().unwrap_or_default().to_string();
-        start = Some((date, id));
+        // A comment missing a string `date`/`id` can't seed the next page's start/start_id
+        // cursor — treat it as the end of the thread instead of looping with empty params
+        // until MAX_PAGES.
+        let (Some(date), Some(id)) = (last_comment["date"].as_str(), last_comment["id"].as_str())
+        else {
+            break;
+        };
+        start = Some((date.to_string(), id.to_string()));
         if page_number + 1 == MAX_PAGES {
             has_more = true;
         }

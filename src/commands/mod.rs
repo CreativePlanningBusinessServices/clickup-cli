@@ -46,8 +46,8 @@ const PATH_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
 /// `resolve_url` does no escaping of its own, so any caller interpolating free text into a
 /// path (not a query param, which reqwest already encodes) must go through this first. Note
 /// this is `%20` (path-segment percent-encoding, RFC 3986), not `+`
-/// (`application/x-www-form-urlencoded` query-string encoding, which `url::form_urlencoded`
-/// produces and which servers only decode as a space inside a query string).
+/// (`application/x-www-form-urlencoded` query-string encoding, which servers only decode as a
+/// space inside a query string, not a path segment).
 pub fn encode_path_segment(raw: &str) -> String {
     utf8_percent_encode(raw, PATH_SEGMENT).to_string()
 }

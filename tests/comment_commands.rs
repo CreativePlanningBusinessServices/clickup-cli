@@ -53,6 +53,34 @@ async fn list_all_pages_with_start_and_start_id() {
     assert_eq!(result["items"].as_array().unwrap().len(), 28);
 }
 
+/// A full (25-item) page whose last comment lacks a usable string `date`/`id` can't seed the
+/// next page's `start`/`start_id` cursor — `list` must treat that as the end of the thread
+/// (one request, `hasMore: false`) instead of looping with empty `start`/`start_id` params
+/// until `MAX_PAGES`.
+#[tokio::test]
+async fn list_all_stops_when_last_comment_lacks_a_string_date_or_id() {
+    let server = MockServer::start().await;
+    let mut comments = page_one_comments();
+    let last = comments.last_mut().unwrap();
+    last["date"] = Value::Null;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/task/868k5a5wa/comment"))
+        .and(query_param_is_missing("start"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"comments": comments})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = common::client_for(&server);
+    let location = CommentLocation::Task("868k5a5wa");
+    let result = comment::list(&client, &location, false, true)
+        .await
+        .unwrap();
+
+    assert_eq!(result["count"], 25);
+    assert_eq!(result["hasMore"], false);
+}
+
 /// Drives `create` through `build_create_body` — the same merge function `dispatch_comment`
 /// calls in `cli.rs` — rather than a pre-merged body, so this test actually exercises the
 /// `--text`/`--notify-all` merge logic instead of just `create`'s passthrough-to-HTTP behavior.

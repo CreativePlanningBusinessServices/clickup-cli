@@ -507,7 +507,7 @@ pub enum TaskAction {
         /// custom_fields JSON, etc.)
         #[arg(long = "query")]
         query: Vec<String>,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "all")]
         page: Option<u64>,
         /// Fetch and merge every page instead of just --page
         #[arg(long)]
@@ -551,7 +551,7 @@ pub enum TaskAction {
         /// custom_fields JSON, etc.)
         #[arg(long = "query")]
         query: Vec<String>,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "all")]
         page: Option<u64>,
         /// Fetch and merge every page instead of just --page
         #[arg(long)]
@@ -622,7 +622,7 @@ pub enum TaskAction {
     Attachments {
         task_id: String,
         /// Fetch one page starting from this cursor
-        #[arg(long)]
+        #[arg(long, conflicts_with = "all")]
         cursor: Option<String>,
         /// Fetch and merge every page instead of just one
         #[arg(long)]
@@ -1104,7 +1104,7 @@ pub enum ViewAction {
     )]
     Tasks {
         view_id: String,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "all")]
         page: Option<u64>,
         /// Fetch and merge every page instead of just --page
         #[arg(long)]
@@ -1195,7 +1195,7 @@ pub enum DocAction {
         #[arg(long)]
         limit: Option<i64>,
         /// Fetch one page starting from this cursor
-        #[arg(long)]
+        #[arg(long, conflicts_with = "all")]
         cursor: Option<String>,
         /// Fetch and merge every page instead of just one
         #[arg(long)]
@@ -1327,7 +1327,7 @@ pub enum ChatAction {
         #[arg(long = "query")]
         query: Vec<String>,
         /// Fetch one page starting from this cursor
-        #[arg(long)]
+        #[arg(long, conflicts_with = "all")]
         cursor: Option<String>,
         /// Fetch and merge every page instead of just one
         #[arg(long)]
@@ -1343,7 +1343,7 @@ pub enum ChatAction {
     Messages {
         channel_id: String,
         /// Fetch one page starting from this cursor
-        #[arg(long)]
+        #[arg(long, conflicts_with = "all")]
         cursor: Option<String>,
         /// Fetch and merge every page instead of just one
         #[arg(long)]
@@ -1374,7 +1374,7 @@ pub enum ChatAction {
     Replies {
         message_id: String,
         /// Fetch one page starting from this cursor
-        #[arg(long)]
+        #[arg(long, conflicts_with = "all")]
         cursor: Option<String>,
         /// Fetch and merge every page instead of just one
         #[arg(long)]
@@ -1398,7 +1398,7 @@ pub enum ChatAction {
     Reactions {
         message_id: String,
         /// Fetch one page starting from this cursor
-        #[arg(long)]
+        #[arg(long, conflicts_with = "all")]
         cursor: Option<String>,
         /// Fetch and merge every page instead of just one
         #[arg(long)]
@@ -1473,7 +1473,7 @@ pub enum ChatChannelAction {
     #[command(after_help = "Example: clickup-cli chat channel members chan1 --all")]
     Members {
         channel_id: String,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "all")]
         cursor: Option<String>,
         #[arg(long)]
         all: bool,
@@ -1482,7 +1482,7 @@ pub enum ChatChannelAction {
     #[command(after_help = "Example: clickup-cli chat channel followers chan1 --all")]
     Followers {
         channel_id: String,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "all")]
         cursor: Option<String>,
         #[arg(long)]
         all: bool,
@@ -3079,6 +3079,84 @@ mod tests {
     fn view_tasks_parses_with_all_flag() {
         Cli::try_parse_from(["clickup-cli", "view", "tasks", "vw1", "--all"])
             .expect("view tasks should parse");
+    }
+
+    /// `--page`/`--cursor` combined with `--all` is a contradiction: `--all` already merges
+    /// every page, so a caller passing both is asking to both fetch one page and fetch every
+    /// page. clap's `conflicts_with = "all"` on every such flag rejects the combination up
+    /// front instead of silently ignoring `--page` and duplicating cursor params on later
+    /// pages.
+    #[test]
+    fn page_and_cursor_flags_conflict_with_all() {
+        expect_parse_error(&["clickup-cli", "task", "list", "124", "--page", "1", "--all"]);
+        expect_parse_error(&["clickup-cli", "task", "filter", "--page", "1", "--all"]);
+        expect_parse_error(&[
+            "clickup-cli",
+            "view",
+            "tasks",
+            "vw1",
+            "--page",
+            "1",
+            "--all",
+        ]);
+        expect_parse_error(&[
+            "clickup-cli",
+            "task",
+            "attachments",
+            "868k5a5wa",
+            "--cursor",
+            "c1",
+            "--all",
+        ]);
+        expect_parse_error(&["clickup-cli", "doc", "search", "--cursor", "c1", "--all"]);
+        expect_parse_error(&["clickup-cli", "chat", "channels", "--cursor", "c1", "--all"]);
+        expect_parse_error(&[
+            "clickup-cli",
+            "chat",
+            "messages",
+            "chan1",
+            "--cursor",
+            "c1",
+            "--all",
+        ]);
+        expect_parse_error(&[
+            "clickup-cli",
+            "chat",
+            "replies",
+            "msg1",
+            "--cursor",
+            "c1",
+            "--all",
+        ]);
+        expect_parse_error(&[
+            "clickup-cli",
+            "chat",
+            "reactions",
+            "msg1",
+            "--cursor",
+            "c1",
+            "--all",
+        ]);
+        expect_parse_error(&[
+            "clickup-cli",
+            "chat",
+            "channel",
+            "members",
+            "chan1",
+            "--cursor",
+            "c1",
+            "--all",
+        ]);
+        expect_parse_error(&[
+            "clickup-cli",
+            "chat",
+            "channel",
+            "followers",
+            "chan1",
+            "--cursor",
+            "c1",
+            "--all",
+        ]);
     }
 
     #[test]
