@@ -153,3 +153,33 @@ async fn empty_body_yields_none() {
     assert_eq!(response.status, 204);
     assert!(response.body.is_none());
 }
+
+#[tokio::test]
+async fn non_json_success_body_is_an_api_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/task/abc"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<html>proxy timeout page</html>"))
+        .mount(&server)
+        .await;
+
+    let client = common::client_for(&server);
+    let error = client
+        .request(reqwest::Method::GET, "/api/v2/task/abc", &[], None)
+        .await
+        .unwrap_err();
+
+    match error {
+        clickup_cli::error::CliError::Api {
+            status,
+            message,
+            ecode,
+        } => {
+            assert_eq!(status, 200);
+            assert!(message.contains("non-JSON success body"));
+            assert!(message.contains("proxy timeout page"));
+            assert!(ecode.is_none());
+        }
+        other => panic!("expected an api error, got {other:?}"),
+    }
+}

@@ -363,3 +363,56 @@ async fn tagged_users_hits_tagged_users_path() {
         .unwrap();
     assert_eq!(result["users"], json!([]));
 }
+
+#[tokio::test]
+async fn merge_cursor_pages_strips_a_seeded_cursor_when_fetching_all() {
+    use clickup_cli::commands::merge_cursor_pages;
+
+    let server = MockServer::start().await;
+    // Page 1 must NOT carry the stale caller-seeded cursor.
+    Mock::given(method("GET"))
+        .and(path("/api/v3/workspaces/9001/chat/channels"))
+        .and(query_param_is_missing("cursor"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"id": "chan1"}],
+            "next_cursor": "c2"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    // Page 2 carries exactly the loop's own cursor.
+    Mock::given(method("GET"))
+        .and(path("/api/v3/workspaces/9001/chat/channels"))
+        .and(query_param("cursor", "c2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"id": "chan2"}],
+            "next_cursor": null
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let seeded = vec![("cursor".to_string(), "stale".to_string())];
+    let result = merge_cursor_pages(
+        &common::client_for(&server),
+        "/api/v3/workspaces/9001/chat/channels",
+        &seeded,
+        "data",
+        true,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result["count"], 2);
+    assert_eq!(result["hasMore"], false);
+    // Prove no request ever carried two cursor params or the stale value.
+    for request in server.received_requests().await.unwrap() {
+        let cursor_pairs: Vec<_> = request
+            .url
+            .query_pairs()
+            .filter(|(key, _)| key == "cursor")
+            .collect();
+        assert!(cursor_pairs.len() <= 1);
+        assert!(cursor_pairs.iter().all(|(_, value)| value != "stale"));
+    }
+}

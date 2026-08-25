@@ -815,8 +815,9 @@ pub enum ChecklistItemAction {
         checklist_id: String,
         #[arg(long)]
         name: Option<String>,
+        /// Numeric user id (ClickUp requires integer ids on checklist items)
         #[arg(long)]
-        assignee: Option<String>,
+        assignee: Option<i64>,
         /// Request body: inline JSON, @file, or - for stdin; merged under --name/--assignee
         #[arg(long)]
         data: Option<String>,
@@ -830,8 +831,9 @@ pub enum ChecklistItemAction {
         item_id: String,
         #[arg(long)]
         name: Option<String>,
+        /// Numeric user id (ClickUp requires integer ids on checklist items)
         #[arg(long)]
-        assignee: Option<String>,
+        assignee: Option<i64>,
         /// Request body: inline JSON, @file, or - for stdin; merged under --name/--assignee
         #[arg(long)]
         data: Option<String>,
@@ -1561,9 +1563,9 @@ pub enum GroupAction {
     Create {
         #[arg(long)]
         name: String,
-        /// Repeatable; user id to add as a member
+        /// Repeatable; numeric user id to add as a member (ClickUp requires integer ids here)
         #[arg(long = "member")]
-        member: Vec<String>,
+        member: Vec<i64>,
         /// Request body: inline JSON, @file, or - for stdin; merged under --name/--member
         #[arg(long)]
         data: Option<String>,
@@ -2147,7 +2149,7 @@ async fn dispatch_checklist_item(
         } => {
             let mut body = commands::parse_data_flag(data.as_deref())?;
             commands::merge_flag(&mut body, "name", name.clone());
-            commands::merge_flag(&mut body, "assignee", assignee.clone());
+            commands::merge_flag(&mut body, "assignee", *assignee);
             checklist::item_add(client, checklist_id, body).await
         }
         ChecklistItemAction::Update {
@@ -2159,7 +2161,7 @@ async fn dispatch_checklist_item(
         } => {
             let mut body = commands::parse_data_flag(data.as_deref())?;
             commands::merge_flag(&mut body, "name", name.clone());
-            commands::merge_flag(&mut body, "assignee", assignee.clone());
+            commands::merge_flag(&mut body, "assignee", *assignee);
             checklist::item_update(client, checklist_id, item_id, body).await
         }
         ChecklistItemAction::Remove {

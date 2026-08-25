@@ -151,18 +151,14 @@ async fn group_create_posts_to_team_group_path() {
     Mock::given(method("POST"))
         .and(path("/api/v2/team/9001/group"))
         .and(body_json(
-            json!({"name": "eng", "members": ["75413867", "123"]}),
+            json!({"name": "eng", "members": [75413867, 123]}),
         ))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "grp1"})))
         .expect(1)
         .mount(&server)
         .await;
 
-    let body = group::build_create_body(
-        json!({}),
-        "eng",
-        &["75413867".to_string(), "123".to_string()],
-    );
+    let body = group::build_create_body(json!({}), "eng", &[75413867, 123]);
     let result = group::create(&common::client_for(&server), body)
         .await
         .unwrap();

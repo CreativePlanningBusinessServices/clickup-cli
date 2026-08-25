@@ -85,7 +85,7 @@ async fn item_add_posts_to_checklist_item_path() {
     Mock::given(method("POST"))
         .and(path("/api/v2/checklist/cl1/checklist_item"))
         .and(body_json(
-            json!({"name": "run tests", "assignee": "75413867"}),
+            json!({"name": "run tests", "assignee": 75413867}),
         ))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "item1"})))
         .expect(1)
@@ -95,7 +95,7 @@ async fn item_add_posts_to_checklist_item_path() {
     let result = checklist::item_add(
         &common::client_for(&server),
         "cl1",
-        json!({"name": "run tests", "assignee": "75413867"}),
+        json!({"name": "run tests", "assignee": 75413867}),
     )
     .await
     .unwrap();

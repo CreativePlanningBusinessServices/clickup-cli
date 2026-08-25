@@ -177,7 +177,22 @@ async fn parse_json_response(
         let body = if raw.trim().is_empty() {
             None
         } else {
-            serde_json::from_str(&raw).ok()
+            // A non-empty success body that isn't JSON (truncated payload, HTML error
+            // page behind a proxy) must surface as an error — silently treating it as
+            // "no body" would make callers report success on garbage.
+            match serde_json::from_str(&raw) {
+                Ok(parsed) => Some(parsed),
+                Err(parse_error) => {
+                    return Err(CliError::Api {
+                        status: status.as_u16(),
+                        message: format!(
+                            "ClickUp returned a non-JSON success body from {url} ({parse_error}): {}",
+                            raw.chars().take(MAX_BODY_ECHO_CHARS).collect::<String>()
+                        ),
+                        ecode: None,
+                    });
+                }
+            }
         };
         return Ok(CuResponse {
             status: status.as_u16(),

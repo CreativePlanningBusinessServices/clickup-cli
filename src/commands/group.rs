@@ -18,7 +18,9 @@ pub async fn list(client: &CuClient, group_ids: Option<String>) -> Result<Value,
 
 /// Builds the body `group create` sends: `--name` merges into `data["name"]`; `--member`
 /// (repeatable) merges into `data["members"]` as an array, only when at least one is given.
-pub fn build_create_body(mut data: Value, name: &str, members: &[String]) -> Value {
+/// Members are numeric: ClickUp's Create Group endpoint requires int32 user ids and
+/// rejects string-typed members.
+pub fn build_create_body(mut data: Value, name: &str, members: &[i64]) -> Value {
     merge_flag(&mut data, "name", Some(name.to_string()));
     if !members.is_empty() {
         data["members"] = json!(members);
@@ -59,12 +61,8 @@ mod tests {
 
     #[test]
     fn build_create_body_merges_name_and_members() {
-        let body = build_create_body(
-            json!({}),
-            "eng",
-            &["75413867".to_string(), "123".to_string()],
-        );
-        assert_eq!(body, json!({"name": "eng", "members": ["75413867", "123"]}));
+        let body = build_create_body(json!({}), "eng", &[75413867, 123]);
+        assert_eq!(body, json!({"name": "eng", "members": [75413867, 123]}));
     }
 
     #[test]

@@ -138,8 +138,17 @@ pub async fn merge_cursor_pages(
     let mut items: Vec<Value> = Vec::new();
     let mut has_more = false;
     let mut cursor: Option<String> = None;
+    // A caller-supplied cursor pair (e.g. smuggled in via a raw `--query cursor=…`)
+    // would be sent alongside the loop's own cursor on every later page, producing
+    // duplicate params the server may resolve either way. The merge always walks from
+    // the beginning, so strip any seeded cursor before paginating.
+    let base_without_cursor: Vec<(String, String)> = base_query
+        .iter()
+        .filter(|(key, _)| key != "cursor")
+        .cloned()
+        .collect();
     for page_number in 0..MAX_PAGES {
-        let mut query = base_query.to_vec();
+        let mut query = base_without_cursor.clone();
         if let Some(cursor_value) = &cursor {
             query.push(("cursor".to_string(), cursor_value.clone()));
         }
