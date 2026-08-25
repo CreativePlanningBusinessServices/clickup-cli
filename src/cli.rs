@@ -7,8 +7,8 @@ use serde_json::Value;
 use crate::client::CuClient;
 use crate::commands;
 use crate::commands::{
-    account, checklist, comment, config_cmd, doc, field, folder, goal, list, raw, space, tag, task,
-    time, view, workspace,
+    account, chat, checklist, comment, config_cmd, doc, field, folder, goal, list, raw, space, tag,
+    task, time, view, workspace,
 };
 use crate::context::{DEFAULT_BASE, context_for};
 use crate::error::CliError;
@@ -131,6 +131,11 @@ pub enum Command {
     Doc {
         #[command(subcommand)]
         action: DocAction,
+    },
+    /// Chat (v3): channels, messages, replies, and reactions
+    Chat {
+        #[command(subcommand)]
+        action: ChatAction,
     },
 }
 
@@ -1262,6 +1267,198 @@ impl ContentEditMode {
     }
 }
 
+#[derive(Subcommand)]
+pub enum ChatAction {
+    /// List channels in the current workspace
+    #[command(
+        after_help = "Example: clickup-cli chat channels --all\n\n--all merges every page into one {items,count,hasMore} envelope, following ClickUp's cursor across pages; omit it to fetch a single page from --cursor. --query passes filters (e.g. room_types, visibility) through verbatim."
+    )]
+    Channels {
+        /// Repeatable key=value query parameter, passed through verbatim
+        #[arg(long = "query")]
+        query: Vec<String>,
+        /// Fetch one page starting from this cursor
+        #[arg(long)]
+        cursor: Option<String>,
+        /// Fetch and merge every page instead of just one
+        #[arg(long)]
+        all: bool,
+    },
+    /// Get, create, update, or delete a chat channel, and its members/followers
+    Channel {
+        #[command(subcommand)]
+        action: ChatChannelAction,
+    },
+    /// List messages in a channel
+    #[command(after_help = "Example: clickup-cli chat messages chan1 --all")]
+    Messages {
+        channel_id: String,
+        /// Fetch one page starting from this cursor
+        #[arg(long)]
+        cursor: Option<String>,
+        /// Fetch and merge every page instead of just one
+        #[arg(long)]
+        all: bool,
+    },
+    /// Send a message to a channel
+    #[command(
+        after_help = "Examples:\n  clickup-cli chat send chan1 --content \"build is green\"\n  clickup-cli chat send chan1 --content \"build is green\" --type post\n\n--content is read the same way --data is (inline text, @file, or -), but is always sent as a plain string, never parsed as JSON. --type defaults to \"message\" when omitted and not already set in --data."
+    )]
+    Send {
+        channel_id: String,
+        /// Message content: inline text, @file, or - for stdin; sent as a plain string, never JSON-parsed
+        #[arg(long)]
+        content: String,
+        #[arg(long = "type")]
+        message_type: Option<String>,
+        /// Request body: inline JSON, @file, or - for stdin; merged under --content/--type
+        #[arg(long)]
+        data: Option<String>,
+    },
+    /// Update, delete, or list the tagged users of a chat message
+    Message {
+        #[command(subcommand)]
+        action: ChatMessageAction,
+    },
+    /// List replies to a message
+    #[command(after_help = "Example: clickup-cli chat replies msg1 --all")]
+    Replies {
+        message_id: String,
+        /// Fetch one page starting from this cursor
+        #[arg(long)]
+        cursor: Option<String>,
+        /// Fetch and merge every page instead of just one
+        #[arg(long)]
+        all: bool,
+    },
+    /// Reply to a message
+    #[command(
+        after_help = "Example: clickup-cli chat reply msg1 --content \"ack\"\n\n--content is read the same way --data is (inline text, @file, or -), but is always sent as a plain string, never parsed as JSON."
+    )]
+    Reply {
+        message_id: String,
+        /// Reply content: inline text, @file, or - for stdin; sent as a plain string, never JSON-parsed
+        #[arg(long)]
+        content: String,
+        /// Request body: inline JSON, @file, or - for stdin; merged under --content
+        #[arg(long)]
+        data: Option<String>,
+    },
+    /// List reactions on a message
+    #[command(after_help = "Example: clickup-cli chat reactions msg1 --all")]
+    Reactions {
+        message_id: String,
+        /// Fetch one page starting from this cursor
+        #[arg(long)]
+        cursor: Option<String>,
+        /// Fetch and merge every page instead of just one
+        #[arg(long)]
+        all: bool,
+    },
+    /// React to a message with an emoji
+    #[command(
+        after_help = "Example: clickup-cli chat react msg1 heart\n\nUse lowercase emoji names (heart, thumbs_up, ...)."
+    )]
+    React {
+        message_id: String,
+        reaction: String,
+    },
+    /// Remove a reaction from a message
+    #[command(after_help = "Example: clickup-cli chat unreact msg1 heart")]
+    Unreact {
+        message_id: String,
+        reaction: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ChatChannelAction {
+    /// Get a single channel
+    #[command(after_help = "Example: clickup-cli chat channel get chan1")]
+    Get { channel_id: String },
+    /// Create a channel
+    #[command(
+        after_help = "Example: clickup-cli chat channel create --name eng-updates\n\n--data supplies fields --name doesn't cover; --name always wins if both set name."
+    )]
+    Create {
+        #[arg(long)]
+        name: String,
+        /// Request body: inline JSON, @file, or - for stdin; merged under --name
+        #[arg(long)]
+        data: Option<String>,
+    },
+    /// Create a channel scoped to a space/folder/list location
+    #[command(
+        after_help = "Example: clickup-cli chat channel create-location --location '{\"folder\":{\"id\":\"457\"}}'"
+    )]
+    CreateLocation {
+        /// Location object: inline JSON, @file, or - for stdin; merged under data[\"location\"]
+        #[arg(long)]
+        location: String,
+        /// Request body: inline JSON, @file, or - for stdin; merged under --location
+        #[arg(long)]
+        data: Option<String>,
+    },
+    /// Create (or fetch) a direct-message channel with one or more users
+    #[command(
+        after_help = "Example: clickup-cli chat channel create-dm --user 75413867 --user 12345"
+    )]
+    CreateDm {
+        /// Repeatable; user id to include in the direct message
+        #[arg(long = "user", required = true)]
+        user: Vec<String>,
+    },
+    /// Update a channel
+    #[command(
+        after_help = "Example: clickup-cli chat channel update chan1 --data '{\"name\": \"renamed\"}'"
+    )]
+    Update {
+        channel_id: String,
+        #[arg(long)]
+        data: Option<String>,
+    },
+    /// Delete a channel
+    #[command(after_help = "Example: clickup-cli chat channel delete chan1")]
+    Delete { channel_id: String },
+    /// List a channel's members
+    #[command(after_help = "Example: clickup-cli chat channel members chan1 --all")]
+    Members {
+        channel_id: String,
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long)]
+        all: bool,
+    },
+    /// List a channel's followers
+    #[command(after_help = "Example: clickup-cli chat channel followers chan1 --all")]
+    Followers {
+        channel_id: String,
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long)]
+        all: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ChatMessageAction {
+    /// Update a message
+    #[command(
+        after_help = "Example: clickup-cli chat message update msg1 --data '{\"content\": \"edited\"}'"
+    )]
+    Update {
+        message_id: String,
+        #[arg(long)]
+        data: Option<String>,
+    },
+    /// Delete a message
+    #[command(after_help = "Example: clickup-cli chat message delete msg1")]
+    Delete { message_id: String },
+    /// List the users tagged (@mentioned) in a message
+    #[command(after_help = "Example: clickup-cli chat message tagged-users msg1")]
+    TaggedUsers { message_id: String },
+}
+
 pub async fn cli_main() -> i32 {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -1341,6 +1538,7 @@ async fn dispatch(cli: &Cli) -> Result<Value, CliError> {
         Command::View { action } => dispatch_view(cli, action).await,
         Command::Goal { action } => dispatch_goal(cli, action).await,
         Command::Doc { action } => dispatch_doc(cli, action).await,
+        Command::Chat { action } => dispatch_chat(cli, action).await,
     }
 }
 
@@ -2129,6 +2327,117 @@ async fn dispatch_doc_page(client: &CuClient, action: &DocPageAction) -> Result<
                 content_format.as_deref(),
             );
             doc::page_update(client, doc_id, page_id, body).await
+        }
+    }
+}
+
+async fn dispatch_chat(cli: &Cli, action: &ChatAction) -> Result<Value, CliError> {
+    let context = context_for(cli.account.as_deref(), cli.workspace.as_deref())?;
+    match action {
+        ChatAction::Channels { query, cursor, all } => {
+            let mut query_pairs = commands::parse_key_value_pairs(query)?;
+            if let Some(cursor) = cursor {
+                query_pairs.push(("cursor".to_string(), cursor.clone()));
+            }
+            chat::channels(&context.client, &query_pairs, *all).await
+        }
+        ChatAction::Channel { action } => dispatch_chat_channel(&context.client, action).await,
+        ChatAction::Messages {
+            channel_id,
+            cursor,
+            all,
+        } => chat::messages(&context.client, channel_id, cursor.clone(), *all).await,
+        ChatAction::Send {
+            channel_id,
+            content,
+            message_type,
+            data,
+        } => {
+            let data = commands::parse_data_flag(data.as_deref())?;
+            let content = commands::read_text_arg(content)?;
+            let body = chat::build_send_body(data, &content, message_type.as_deref());
+            chat::send(&context.client, channel_id, body).await
+        }
+        ChatAction::Message { action } => dispatch_chat_message(&context.client, action).await,
+        ChatAction::Replies {
+            message_id,
+            cursor,
+            all,
+        } => chat::replies(&context.client, message_id, cursor.clone(), *all).await,
+        ChatAction::Reply {
+            message_id,
+            content,
+            data,
+        } => {
+            let data = commands::parse_data_flag(data.as_deref())?;
+            let content = commands::read_text_arg(content)?;
+            let body = chat::build_reply_body(data, &content);
+            chat::reply(&context.client, message_id, body).await
+        }
+        ChatAction::Reactions {
+            message_id,
+            cursor,
+            all,
+        } => chat::reactions(&context.client, message_id, cursor.clone(), *all).await,
+        ChatAction::React {
+            message_id,
+            reaction,
+        } => chat::react(&context.client, message_id, reaction).await,
+        ChatAction::Unreact {
+            message_id,
+            reaction,
+        } => chat::unreact(&context.client, message_id, reaction).await,
+    }
+}
+
+async fn dispatch_chat_channel(
+    client: &CuClient,
+    action: &ChatChannelAction,
+) -> Result<Value, CliError> {
+    match action {
+        ChatChannelAction::Get { channel_id } => chat::channel_get(client, channel_id).await,
+        ChatChannelAction::Create { name, data } => {
+            let data = commands::parse_data_flag(data.as_deref())?;
+            let body = chat::build_channel_create_body(data, name);
+            chat::channel_create(client, body).await
+        }
+        ChatChannelAction::CreateLocation { location, data } => {
+            let data = commands::parse_data_flag(data.as_deref())?;
+            let location = commands::read_data_arg(location)?;
+            let body = chat::build_channel_create_location_body(data, location);
+            chat::channel_create_location(client, body).await
+        }
+        ChatChannelAction::CreateDm { user } => chat::channel_create_dm(client, user).await,
+        ChatChannelAction::Update { channel_id, data } => {
+            let body = commands::parse_data_flag(data.as_deref())?;
+            chat::channel_update(client, channel_id, body).await
+        }
+        ChatChannelAction::Delete { channel_id } => chat::channel_delete(client, channel_id).await,
+        ChatChannelAction::Members {
+            channel_id,
+            cursor,
+            all,
+        } => chat::channel_members(client, channel_id, cursor.clone(), *all).await,
+        ChatChannelAction::Followers {
+            channel_id,
+            cursor,
+            all,
+        } => chat::channel_followers(client, channel_id, cursor.clone(), *all).await,
+    }
+}
+
+async fn dispatch_chat_message(
+    client: &CuClient,
+    action: &ChatMessageAction,
+) -> Result<Value, CliError> {
+    match action {
+        ChatMessageAction::Update { message_id, data } => {
+            let body = commands::parse_data_flag(data.as_deref())?;
+            chat::message_update(client, message_id, body).await
+        }
+        ChatMessageAction::Delete { message_id } => chat::message_delete(client, message_id).await,
+        ChatMessageAction::TaggedUsers { message_id } => {
+            chat::tagged_users(client, message_id).await
         }
     }
 }
