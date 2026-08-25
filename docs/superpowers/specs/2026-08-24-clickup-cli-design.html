@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>clickup-cli — Design Spec</title>
+<style>
+  :root {
+    --ink: #1a2233; --muted: #5b6478; --line: #dfe3ea; --bg: #ffffff;
+    --panel: #f6f8fb; --accent: #4466ff; --code-bg: #f0f2f7; --warn: #8a5a00;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2.5rem 1.5rem 5rem; background: var(--bg); color: var(--ink);
+    font: 16px/1.6 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  main { max-width: 60rem; margin: 0 auto; }
+  h1 { font-size: 1.9rem; margin: 0 0 .25rem; }
+  .subtitle { color: var(--muted); margin: 0 0 2rem; }
+  h2 { font-size: 1.35rem; margin: 2.5rem 0 .75rem; padding-top: .75rem; border-top: 2px solid var(--line); }
+  h3 { font-size: 1.05rem; margin: 1.5rem 0 .5rem; }
+  code, pre { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: .875em; }
+  code { background: var(--code-bg); padding: .1em .35em; border-radius: 4px; }
+  pre { background: var(--code-bg); padding: .9rem 1.1rem; border-radius: 8px; overflow-x: auto; line-height: 1.5; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .95rem; }
+  th, td { border: 1px solid var(--line); padding: .45rem .65rem; text-align: left; vertical-align: top; }
+  th { background: var(--panel); }
+  td code { white-space: nowrap; }
+  .note { background: var(--panel); border-left: 4px solid var(--accent); padding: .75rem 1rem; border-radius: 0 8px 8px 0; margin: 1rem 0; }
+  .decision {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 1.25rem 1.5rem; margin: 2rem 0;
+  }
+  .decision h2 { border: none; margin: 0 0 .5rem; padding: 0; font-size: 1.15rem; }
+  .buttons { display: flex; gap: .75rem; flex-wrap: wrap; margin-top: .75rem; }
+  .buttons a {
+    display: inline-block; padding: .55rem 1.2rem; border-radius: 8px; text-decoration: none;
+    font-weight: 600; border: 1px solid var(--accent);
+  }
+  .buttons a.primary { background: var(--accent); color: #fff; }
+  .buttons a.secondary { background: #fff; color: var(--accent); }
+  ul { padding-left: 1.4rem; }
+  li { margin: .25rem 0; }
+</style>
+</head>
+<body>
+<main>
+<h1>clickup-cli — Design Spec</h1>
+<p class="subtitle">2026-08-24 · ClickUp task <a href="https://app.clickup.com/t/868k5a5wa">868k5a5wa</a> · third sibling of netsuite-cli (v0.9.2) and intacct-cli (v0.1.1)</p>
+
+<div class="decision">
+  <h2>Review decision</h2>
+  <p>Read the spec, then answer here (or just tell Claude in the terminal):</p>
+  <div class="buttons">
+    <a class="primary" href="http://127.0.0.1:8137/pick?c=approve&amp;l=Approve+spec" target="_blank">Approve — write the implementation plan</a>
+    <a class="secondary" href="http://127.0.0.1:8137/pick?c=changes&amp;l=Request+changes" target="_blank">I want changes (describe them in the terminal)</a>
+  </div>
+</div>
+
+<h2>1. Goal &amp; shape</h2>
+<p>
+A Rust CLI exposing the ClickUp API (v2 + the v3 Docs/Chat endpoints) as composable noun-verb
+subcommands with strict JSON output, built for AI agents, with a bundled agent skill. It follows
+intacct-cli's architecture — the refined sibling — everywhere it applies, simplified where
+ClickUp's auth model allows.
+</p>
+<ul>
+  <li><strong>In scope:</strong> every mainstream API family typed (tasks, lists, folders, spaces, comments, checklists, tags, custom fields, dependencies/links, attachments, time tracking, views, goals, docs, chat, users, groups, webhooks, templates, workspace info), a <code>raw</code> escape hatch, multi-account keyring auth, self-update, embedded skill, wiremock test suite, 3-OS CI + tag-driven releases.</li>
+  <li><strong>Out of scope (reachable via <code>raw</code>):</strong> enterprise-only guests, audit logs, custom roles, privacy/access updates. No OAuth2 flow, no webhook <em>listener</em> (only webhook CRUD), no output formats other than JSON.</li>
+</ul>
+
+<h2>2. Auth, accounts, config</h2>
+<p>
+<strong>Personal API token only</strong> (<code>pk_…</code>). Tokens don't expire and are sent verbatim in the
+<code>Authorization</code> header. No token cache, no refresh, no <code>TokenProvider</code> indirection beyond a
+minimal trait for test injection; a 401 is a real auth failure → exit 3, never retried.
+</p>
+<h3>Bootstrap</h3>
+<pre><code>clickup-cli account add work            # token from $CLICKUP_CLI_TOKEN or hidden prompt — never a flag
+clickup-cli account test                # GET /v2/user → {"ok":true,"user":...,"workspace":...}</code></pre>
+<ul>
+  <li><code>account add</code> validates the token with <code>GET /v2/user</code>, fetches workspaces with <code>GET /v2/team</code>; a single workspace is stored automatically, multiple → pick interactively (TTY) or via <code>--workspace-id</code>.</li>
+  <li>First account added becomes <code>default_account</code>. Write ordering: config before keychain on add, config before keychain-delete on remove (partial failures stay re-runnable; regression-tested with a failing store, same as intacct-cli).</li>
+  <li>Verbs: <code>add</code>, <code>list</code> (never shows secrets), <code>set-default</code>, <code>remove</code>, <code>test</code>.</li>
+</ul>
+<h3>Storage</h3>
+<table>
+<tr><th>Where</th><th>What</th></tr>
+<tr><td>Keyring, service <code>clickup-cli</code>, user = alias</td><td><code>AccountSecrets</code> JSON — internally tagged enum, today one variant <code>{"kind":"token","token":"pk_…"}</code> (tag keeps a future OAuth variant migration-free)</td></tr>
+<tr><td><code>…/com.CreativePlanning.clickup-cli/config.toml</code></td><td><code>default_account</code> + <code>[accounts.&lt;alias&gt;]</code> with <code>workspace_id</code> (and optional future fields via <code>skip_serializing_if</code>); accounts in a <code>BTreeMap</code>; no secrets ever</td></tr>
+</table>
+<h3>Resolution &amp; globals</h3>
+<ul>
+  <li>Alias: <code>--account</code> → <code>$CLICKUP_ACCOUNT</code> → <code>default_account</code> → usage error naming the exact remediation command.</li>
+  <li><code>--workspace &lt;id&gt;</code> (global) overrides the configured <code>workspace_id</code> for team-scoped endpoints — fills intacct-cli's <code>--entity</code> slot.</li>
+  <li><code>--pretty</code> (global) indents; JSON is otherwise unconditional and compact. No <code>--json</code> flag, no color (<code>ColorChoice::Never</code>), no logging framework.</li>
+  <li>Env: <code>CLICKUP_ACCOUNT</code>, <code>CLICKUP_CLI_TOKEN</code> (bootstrap only), <code>CLICKUP_API_BASE</code> (tests/mocks), <code>CLICKUP_LIVE_ALIAS</code> (live smoke), <code>GITHUB_TOKEN</code> (self-update), <code>CLAUDE_CONFIG_DIR</code> (skill install).</li>
+</ul>
+
+<h2>3. Command surface</h2>
+<p>Noun families with verb subcommands (<code>#[derive(Subcommand)] enum XAction</code> per family). Positionals for identity, kebab-case <code>--long</code> flags only, <code>--data</code> accepts inline JSON / <code>@file</code> / <code>-</code> (stdin), <code>after_help</code> carries copy-paste-correct examples on every subcommand.</p>
+<table>
+<tr><th>Family</th><th>Verbs</th><th>API coverage</th></tr>
+<tr><td><code>account</code></td><td>add · list · set-default · remove · test</td><td>bootstrap; <code>GET /user</code>, <code>GET /team</code></td></tr>
+<tr><td><code>config</code></td><td>get · set</td><td>local config (e.g. <code>default_account</code>)</td></tr>
+<tr><td><code>workspace</code></td><td>list · seats · plan · shared · task-types</td><td>teams, seats, plan, shared hierarchy, custom task types</td></tr>
+<tr><td><code>space</code></td><td>list · get · create · update · delete</td><td>Spaces</td></tr>
+<tr><td><code>folder</code></td><td>list · get · create · update · delete · from-template</td><td>Folders</td></tr>
+<tr><td><code>list</code></td><td>list · get · create · update · delete · from-template · add-task · remove-task · members</td><td>Lists (in-folder and folderless via <code>--space</code>/<code>--folder</code>), tasks-in-multiple-lists, list members</td></tr>
+<tr><td><code>task</code></td><td>create · get · list · filter · update · delete · move · merge · from-template · members · time-in-status · attach<br>nested: <code>tag add|remove</code> · <code>dependency add|remove</code> · <code>link add|remove</code></td><td>Tasks incl. filtered team tasks, bulk time-in-status (<code>time-in-status --bulk</code>), multipart attachment upload, task tags, dependencies, links</td></tr>
+<tr><td><code>comment</code></td><td>list · create · update · delete · replies · reply</td><td>task / list / chat-view comments (<code>--task</code>/<code>--list</code>/<code>--view</code>), threaded comments</td></tr>
+<tr><td><code>checklist</code></td><td>create · update · delete · item add · item update · item remove</td><td>Checklists + items</td></tr>
+<tr><td><code>field</code></td><td>list · set · remove</td><td>custom fields at list/folder/space/workspace; set/remove value on a task</td></tr>
+<tr><td><code>tag</code></td><td>list · create · update · delete</td><td>space tags (task tagging lives under <code>task tag</code>)</td></tr>
+<tr><td><code>time</code></td><td>list · get · create · update · delete · history · current · start · stop · tags · tag add|remove|rename</td><td>Time tracking (modern endpoints; legacy tracked-time via <code>raw</code>)</td></tr>
+<tr><td><code>view</code></td><td>list · get · create · update · delete · tasks</td><td>views at workspace/space/folder/list via location flags</td></tr>
+<tr><td><code>goal</code></td><td>list · get · create · update · delete · key-result add|update|remove</td><td>Goals + targets</td></tr>
+<tr><td><code>doc</code></td><td>search · create · get · pages · page get · page create · page update</td><td>Docs v3</td></tr>
+<tr><td><code>chat</code></td><td>channels · channel get|create|update|delete|members|followers · messages · send · message update|delete · replies · reply · reactions · react · unreact</td><td>Chat v3</td></tr>
+<tr><td><code>user</code></td><td>get · invite · edit · remove</td><td>workspace users</td></tr>
+<tr><td><code>group</code></td><td>list · create · update · delete</td><td>user groups</td></tr>
+<tr><td><code>webhook</code></td><td>list · create · update · delete</td><td>Webhooks (CRUD only)</td></tr>
+<tr><td><code>template</code></td><td>list</td><td>task/list/folder templates via <code>--type</code></td></tr>
+<tr><td><code>raw</code></td><td>—</td><td><code>raw GET /v2/team/123/guest/456 --query k=v --header 'X: y' --data @f.json</code>; any endpoint incl. enterprise</td></tr>
+<tr><td><code>skill</code> / <code>update</code></td><td>install / --check</td><td>embedded SKILL.md install; GitHub-release self-update</td></tr>
+</table>
+<div class="note">
+Exact per-verb flags and endpoint paths are enumerated at the implementation-plan stage against the
+OpenAPI spec / per-page <code>.md</code> docs (<code>developer.clickup.com</code> pages serve markdown when
+<code>.md</code> is appended), so the spec doesn't fossilize path details.
+</div>
+
+<h2>4. Client &amp; HTTP behavior</h2>
+<ul>
+  <li><code>CuClient</code> wraps <code>reqwest</code> (rustls, no default features): base <code>https://api.clickup.com</code>, override via <code>CLICKUP_API_BASE</code> and constructor injection (tests). Commands address <code>/api/v2/…</code> or <code>/api/v3/workspaces/{id}/…</code> explicitly.</li>
+  <li>One shared <code>send_with_retry</code> loop (JSON, multipart, and any binary paths): <code>MAX_ATTEMPTS = 4</code>, honor <code>Retry-After</code> on 429 (ClickUp: 100 req/min/token), exponential backoff <code>500ms·2^n</code> on 5xx. <strong>401 fails immediately with exit 3</strong> — personal tokens can't be refreshed, so unlike the siblings there is no reauth-and-retry branch.</li>
+  <li>Error mapping: ClickUp bodies are <code>{"err":"…","ECODE":"…"}</code> → envelope <code>{"kind":"api","message":err,"status":N,"ecode":"…"}</code>; <code>ecode</code> omitted when absent (the <code>supportId</code> pattern from intacct-cli).</li>
+  <li>Pagination: listing endpoints are page-based (100/page, some return <code>last_page</code>). <code>--page N</code> for one page; <code>--all</code> merges into <code>{items, count, hasMore}</code> with the sibling safety rails — <code>MAX_PAGES</code> cap and a stop when a page contributes zero items; <code>hasMore:true</code> in merged output means partial data (documented in the skill).</li>
+</ul>
+
+<h2>5. Output contract</h2>
+<table>
+<tr><th>Exit</th><th>kind</th><th>Meaning</th></tr>
+<tr><td>0</td><td>—</td><td>success; stdout is exactly one JSON value (compact; <code>--pretty</code> indents)</td></tr>
+<tr><td>1</td><td><code>api</code></td><td>ClickUp rejected the call; envelope adds <code>status</code>, <code>ecode?</code></td></tr>
+<tr><td>2</td><td><code>usage</code></td><td>bad invocation — includes clap parse failures, folded in via <code>handle_clap_error</code>; only <code>--help</code>/<code>--version</code> print human text (stdout, exit 0)</td></tr>
+<tr><td>3</td><td><code>auth</code></td><td>token missing/invalid (401/403 auth-shaped)</td></tr>
+<tr><td>4</td><td><code>network</code></td><td>transport failure after retries</td></tr>
+</table>
+<p>Errors are one JSON object on <strong>stderr</strong>. Prompts and notices go to stderr, never stdout. Success shapes pass the API body through untouched; synthesized shapes only where there's no body (<code>{"deleted":true,…}</code>, account/skill/update results).</p>
+
+<h2>6. Crate layout</h2>
+<pre><code>src/
+  main.rs            # 4 lines: exit(clickup_cli::cli::cli_main().await)
+  lib.rs             # pub mod account, auth, cli, client, commands, config, context, error, output, secrets
+  cli.rs             # entire clap tree + cli_main + handle_clap_error + dispatch fns
+  client.rs          # CuClient, CuResponse, send_with_retry, api_error mapping
+  config.rs          # Config/AccountEntry TOML, resolve_alias, default paths (directories)
+  secrets.rs         # SecretStore trait + KeyringStore + MemoryStore, AccountSecrets
+  auth.rs            # minimal token provider (static token from secrets) — no OAuth machinery
+  context.rs         # AccountContext + context_for(alias_flag, workspace_flag) — the one wiring seam
+  account.rs         # pure helpers (URL building, workspace selection)
+  error.rs           # CliError {Api, Usage, Auth, Network} + exit_code() + to_json()
+  output.rs          # print_success / print_error (~17 lines)
+  commands/          # one file per family; fns take &amp;CuClient, return Result&lt;Value, CliError&gt;, never print
+skills/clickup-cli/SKILL.md   # embedded via include_str!; installed by `skill install`
+tests/               # per-family wiremock tests + common/mod.rs + cli_smoke.rs + live_smoke.rs</code></pre>
+<p>Unit tests for pure logic sit in <code>#[cfg(test)]</code> blocks at the bottom of src files; comments explain <em>why</em> at decision sites (house style).</p>
+
+<h2>7. Skill</h2>
+<p><code>skills/clickup-cli/SKILL.md</code>, intacct-length (~85 lines): 2-line output contract, "Pick the right command" table, ID-hierarchy primer (workspace → space → folder → list → task; which IDs each family needs), bootstrap block, recipes, exit-code→action table, gotchas (rate limit, <code>hasMore</code> partial data, v3 families needing <code>workspace_id</code>, custom task IDs needing <code>--custom-ids --workspace</code>). Install skips symlinked targets / identical content / missing config dir; <code>update</code> re-execs the new binary for <code>skill install</code>. <code>.gitattributes</code> forces LF so embedded bytes are stable.</p>
+
+<h2>8. Tests &amp; CI</h2>
+<ul>
+  <li><code>tests/common/mod.rs</code>: static test token + <code>client_for(&amp;MockServer)</code>; command tests call library fns directly and assert returned <code>Value</code>s plus request shapes (<code>body_json</code>, <code>query_param</code>, <code>.expect(1)</code> for pagination-stops proofs).</li>
+  <li>Account/config tests: <code>tempfile</code> + <code>MemoryStore</code> + a <code>FailingSecretStore</code> for the write-ordering invariant. <code>cli_smoke.rs</code> (assert_cmd, non-Windows): <code>--help</code> exits 0; unknown alias → exit 2 with <code>"kind":"usage"</code> on stderr.</li>
+  <li><code>live_smoke.rs</code>: all <code>#[ignore]</code>, gated on <code>CLICKUP_LIVE_ALIAS</code>, never in CI.</li>
+  <li>CI: macOS/Windows/Ubuntu <code>cargo test --locked</code>; Ubuntu lint (<code>fmt --check</code>, <code>clippy --all-targets -- -D warnings</code>). Release on <code>v*</code> tags: aarch64/x86_64 macOS + Windows zips via <code>softprops/action-gh-release</code>. No Linux release binary (keyring backend), Linux is CI-only.</li>
+</ul>
+
+<h2>9. Dependencies (delta from scaffold)</h2>
+<p>Scaffold Cargo.toml already matches intacct-cli minus OAuth/XML. Add: <code>self_update</code> (rustls, zip). Remove: <code>webbrowser</code> (unused without an OAuth flow). Keep <code>rpassword</code> (hidden token prompt). No <code>rand</code>/<code>sha2</code>/<code>base64</code>/<code>rcgen</code>/<code>tokio-rustls</code> needed.</p>
+
+<div class="decision">
+  <h2>Review decision</h2>
+  <div class="buttons">
+    <a class="primary" href="http://127.0.0.1:8137/pick?c=approve&amp;l=Approve+spec" target="_blank">Approve — write the implementation plan</a>
+    <a class="secondary" href="http://127.0.0.1:8137/pick?c=changes&amp;l=Request+changes" target="_blank">I want changes (describe them in the terminal)</a>
+  </div>
+</div>
+</main>
+</body>
+</html>

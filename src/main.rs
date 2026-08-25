@@ -1,3 +1,4 @@
-fn main() {
-    println!("clickup-cli: scaffold — command surface not implemented yet");
+#[tokio::main]
+async fn main() {
+    std::process::exit(clickup_cli::cli::cli_main().await);
 }
