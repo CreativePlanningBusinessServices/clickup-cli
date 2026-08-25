@@ -9,7 +9,7 @@ use crate::commands;
 use crate::commands::template::TemplateKind;
 use crate::commands::{
     account, chat, checklist, comment, config_cmd, doc, field, folder, goal, group, list, raw,
-    skill, space, tag, task, template, time, user, view, webhook, workspace,
+    skill, space, tag, task, template, time, update, user, view, webhook, workspace,
 };
 use crate::context::{DEFAULT_BASE, context_for};
 use crate::error::CliError;
@@ -165,6 +165,16 @@ pub enum Command {
     Skill {
         #[command(subcommand)]
         action: SkillAction,
+    },
+    /// Self-update from GitHub releases (requires GITHUB_TOKEN for this private repo)
+    #[command(after_help = "Examples:\n  clickup-cli update --check\n  clickup-cli update")]
+    Update {
+        /// Report the current/latest versions without installing
+        #[arg(long)]
+        check: bool,
+        /// Skip re-running `skill install` after a successful update
+        #[arg(long = "no-skill")]
+        no_skill: bool,
     },
 }
 
@@ -1704,6 +1714,7 @@ async fn dispatch(cli: &Cli) -> Result<Value, CliError> {
         Command::Skill { action } => match action {
             SkillAction::Install { dir } => skill::install(dir.as_deref()),
         },
+        Command::Update { check, no_skill } => update::run(*check, *no_skill).await,
     }
 }
 

@@ -16,6 +16,7 @@ pub mod tag;
 pub mod task;
 pub mod template;
 pub mod time;
+pub mod update;
 pub mod user;
 pub mod view;
 pub mod webhook;
