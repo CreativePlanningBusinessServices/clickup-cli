@@ -831,9 +831,10 @@ pub enum ChecklistItemAction {
         item_id: String,
         #[arg(long)]
         name: Option<String>,
-        /// Numeric user id (ClickUp requires integer ids on checklist items)
+        /// User id. ClickUp's edit-checklist-item schema types assignee as a STRING
+        /// (or null), unlike create's int32 — the API is genuinely inconsistent here.
         #[arg(long)]
-        assignee: Option<i64>,
+        assignee: Option<String>,
         /// Request body: inline JSON, @file, or - for stdin; merged under --name/--assignee
         #[arg(long)]
         data: Option<String>,
@@ -2161,7 +2162,7 @@ async fn dispatch_checklist_item(
         } => {
             let mut body = commands::parse_data_flag(data.as_deref())?;
             commands::merge_flag(&mut body, "name", name.clone());
-            commands::merge_flag(&mut body, "assignee", *assignee);
+            commands::merge_flag(&mut body, "assignee", assignee.clone());
             checklist::item_update(client, checklist_id, item_id, body).await
         }
         ChecklistItemAction::Remove {
@@ -2935,17 +2936,30 @@ mod tests {
             "75413867",
         ])
         .expect("checklist item add should parse");
-        Cli::try_parse_from([
+        // ClickUp types create's assignee as int32 but edit's as string-or-null; pin
+        // the divergent flag types so a "cleanup" doesn't re-unify them.
+        let update = Cli::try_parse_from([
             "clickup-cli",
             "checklist",
             "item",
             "update",
             "cl1",
             "item1",
+            "--assignee",
+            "75413867",
             "--data",
             r#"{"resolved":true}"#,
         ])
         .expect("checklist item update should parse");
+        match update.command {
+            Command::Checklist {
+                action:
+                    ChecklistAction::Item {
+                        action: ChecklistItemAction::Update { assignee, .. },
+                    },
+            } => assert_eq!(assignee.as_deref(), Some("75413867")),
+            _ => panic!("expected a checklist item update command"),
+        }
     }
 
     #[test]
