@@ -229,7 +229,7 @@ fn auth_error(status: reqwest::StatusCode, raw: &str) -> CliError {
     ))
 }
 
-fn api_error(status: reqwest::StatusCode, raw: &str) -> CliError {
+pub(crate) fn api_error(status: reqwest::StatusCode, raw: &str) -> CliError {
     let (message, ecode) = describe_error(status, raw);
     CliError::Api {
         status: status.as_u16(),

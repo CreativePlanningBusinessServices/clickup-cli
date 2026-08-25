@@ -106,6 +106,7 @@ async fn add_validates_token_and_stores_workspace() {
 
     match store.get("work").unwrap().expect("token stored") {
         AccountSecrets::Token { token } => assert_eq!(token, "pk_test"),
+        other => panic!("expected a personal-token entry, got {other:?}"),
     }
 }
 
