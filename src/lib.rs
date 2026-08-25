@@ -4,5 +4,6 @@ pub mod commands;
 pub mod config;
 pub mod context;
 pub mod error;
+pub mod oauth;
 pub mod output;
 pub mod secrets;

@@ -43,6 +43,21 @@ clickup-cli account test                            # verifies the token end-to-
 The first account added becomes the default; select others with `--account <alias>` or
 `$CLICKUP_ACCOUNT`.
 
+**OAuth apps** (for workspaces that block personal API keys — `can_use_public_api_dev_key`
+permission failures): create a ClickUp app with `http://localhost:8899` in its redirect URLs,
+then
+
+```bash
+export CLICKUP_CLI_CLIENT_SECRET='<secret>'   # or omit to be prompted; never a flag
+clickup-cli account add cp --flow oauth --client-id <id>   # opens the browser; pick workspaces there
+clickup-cli account login cp                                # only if ClickUp later revokes the token
+```
+
+OAuth tokens are sent as `Authorization: Bearer …` (personal tokens go raw), don't expire, and
+have no refresh token — `account login` re-runs the browser flow using the stored client
+credentials. `--paste` skips the localhost listener and reads the code from the redirect URL by
+hand; `--port` must match the app's registered redirect.
+
 ## Commands
 
 `workspace` (ClickUp calls it a "team") → `space` → `folder` (optional) → `list` → `task`. Most

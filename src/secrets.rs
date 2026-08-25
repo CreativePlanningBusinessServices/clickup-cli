@@ -10,8 +10,21 @@ pub const KEYRING_SERVICE: &str = "clickup-cli";
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum AccountSecrets {
-    // The tag keeps a future OAuth variant migration-free.
-    Token { token: String },
+    // The kind tag is what let this enum grow the OAuth variant without migrating
+    // existing keychain entries.
+    Token {
+        token: String,
+    },
+    /// ClickUp OAuth app credentials plus the exchanged access token. ClickUp OAuth
+    /// tokens don't expire and have no refresh token, so the client id/secret are kept
+    /// only to let `account login` re-run the browser flow after a revocation.
+    // kebab-case would render the variant as "o-auth"; pin the tag explicitly.
+    #[serde(rename = "oauth")]
+    OAuth {
+        client_id: String,
+        client_secret: String,
+        access_token: String,
+    },
 }
 
 pub trait SecretStore: Send + Sync {
@@ -97,6 +110,28 @@ mod tests {
         };
         let value = serde_json::to_value(&secrets).unwrap();
         assert_eq!(value, json!({"kind": "token", "token": "pk_123"}));
+
+        let round_tripped: AccountSecrets = serde_json::from_value(value).unwrap();
+        assert_eq!(round_tripped, secrets);
+    }
+
+    #[test]
+    fn oauth_secrets_serialize_with_kind_tag() {
+        let secrets = AccountSecrets::OAuth {
+            client_id: "ABC123".into(),
+            client_secret: "shh".into(),
+            access_token: "oauth_token_value".into(),
+        };
+        let value = serde_json::to_value(&secrets).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "kind": "oauth",
+                "client_id": "ABC123",
+                "client_secret": "shh",
+                "access_token": "oauth_token_value",
+            })
+        );
 
         let round_tripped: AccountSecrets = serde_json::from_value(value).unwrap();
         assert_eq!(round_tripped, secrets);

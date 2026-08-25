@@ -48,15 +48,24 @@ pub fn context_from(
             "no token stored for '{alias}' — run `clickup-cli account add {alias}`"
         ))
     })?;
-    let AccountSecrets::Token { token } = secrets;
+    let auth_header = auth_header_for(&secrets);
     let base = env_base
         .map(str::to_string)
         .unwrap_or_else(|| DEFAULT_BASE.to_string());
     let workspace_id = workspace_flag
         .map(str::to_string)
         .unwrap_or_else(|| entry.workspace_id.clone());
-    let client = CuClient::new(base, token, Some(workspace_id));
+    let client = CuClient::new(base, auth_header, Some(workspace_id));
     Ok(AccountContext { alias, client })
+}
+
+/// ClickUp's Authorization header differs by credential kind: personal `pk_` tokens are
+/// sent verbatim, but OAuth access tokens need the `Bearer ` prefix.
+pub fn auth_header_for(secrets: &AccountSecrets) -> String {
+    match secrets {
+        AccountSecrets::Token { token } => token.clone(),
+        AccountSecrets::OAuth { access_token, .. } => format!("Bearer {access_token}"),
+    }
 }
 
 #[cfg(test)]
@@ -64,6 +73,24 @@ mod tests {
     use super::*;
     use crate::config::AccountEntry;
     use crate::secrets::MemoryStore;
+
+    #[test]
+    fn personal_tokens_are_sent_raw_and_oauth_tokens_as_bearer() {
+        assert_eq!(
+            auth_header_for(&AccountSecrets::Token {
+                token: "pk_123".into()
+            }),
+            "pk_123"
+        );
+        assert_eq!(
+            auth_header_for(&AccountSecrets::OAuth {
+                client_id: "ABC".into(),
+                client_secret: "shh".into(),
+                access_token: "oauth_token_value".into(),
+            }),
+            "Bearer oauth_token_value"
+        );
+    }
 
     fn sample_config() -> Config {
         let mut config = Config::default();

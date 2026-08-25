@@ -52,6 +52,11 @@ clickup-cli account add work --workspace-id 9001   # --workspace-id only needed 
 clickup-cli account test                           # verifies the token end-to-end
 ```
 
+If the workspace blocks personal API keys (`can_use_public_api_dev_key` errors), bootstrap an
+OAuth app instead: `clickup-cli account add <alias> --flow oauth --client-id <id>` (secret via
+`CLICKUP_CLI_CLIENT_SECRET` or prompt; browser opens to authorize). `account login <alias>`
+re-runs the flow if the token is revoked.
+
 First account added becomes the default; select others with `--account <alias>` or
 `$CLICKUP_ACCOUNT`.
 

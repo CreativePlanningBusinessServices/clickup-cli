@@ -225,11 +225,11 @@ fn retry_after_seconds(response: &reqwest::Response) -> Option<u64> {
 fn auth_error(status: reqwest::StatusCode, raw: &str) -> CliError {
     let (message, _) = describe_error(status, raw);
     CliError::Auth(format!(
-        "ClickUp rejected the token ({message}) — check `clickup-cli account test` or re-run `account add`"
+        "ClickUp rejected the token ({message}) — check `clickup-cli account test`, re-run `account add`, or `account login` for oauth accounts"
     ))
 }
 
-fn api_error(status: reqwest::StatusCode, raw: &str) -> CliError {
+pub(crate) fn api_error(status: reqwest::StatusCode, raw: &str) -> CliError {
     let (message, ecode) = describe_error(status, raw);
     CliError::Api {
         status: status.as_u16(),

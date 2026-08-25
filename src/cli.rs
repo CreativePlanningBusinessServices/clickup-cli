@@ -209,17 +209,48 @@ impl HttpMethodArg {
     }
 }
 
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum AuthFlowArg {
+    Token,
+    Oauth,
+}
+
 #[derive(Subcommand)]
 pub enum AccountAction {
     /// Add or overwrite an account alias; the first account added becomes the default
     #[command(
-        after_help = "Examples:\n  clickup-cli account add work\n  clickup-cli account add work --workspace-id 9001\n\nThe token is never a flag: set CLICKUP_CLI_TOKEN, or run interactively to be prompted for it."
+        after_help = "Examples:\n  clickup-cli account add work\n  clickup-cli account add work --workspace-id 9001\n  clickup-cli account add cp --flow oauth --client-id ABC123\n\nSecrets are never flags: set CLICKUP_CLI_TOKEN (personal token) or CLICKUP_CLI_CLIENT_SECRET (oauth), or run interactively to be prompted. The oauth flow opens your browser and needs http://localhost:<port> on the app's redirect URLs."
     )]
     Add {
         alias: String,
         /// Workspace (team) id to use when the token has access to more than one
         #[arg(long = "workspace-id")]
         workspace_id: Option<String>,
+        /// Credential kind: a personal pk_ token (default) or an OAuth app
+        #[arg(long, value_enum, default_value = "token")]
+        flow: AuthFlowArg,
+        /// OAuth app client id (oauth flow; prompted for when omitted)
+        #[arg(long = "client-id")]
+        client_id: Option<String>,
+        /// Localhost port for the OAuth redirect (must match the app's redirect URL)
+        #[arg(long, default_value_t = 8899)]
+        port: u16,
+        /// Print the authorize URL and paste the code manually instead of listening
+        #[arg(long)]
+        paste: bool,
+    },
+    /// Re-run the OAuth browser flow for an existing oauth account
+    #[command(after_help = "Example: clickup-cli account login cp
+
+Uses the stored client id/secret; only needed if ClickUp revoked the token.")]
+    Login {
+        alias: String,
+        /// Localhost port for the OAuth redirect (must match the app's redirect URL)
+        #[arg(long, default_value_t = 8899)]
+        port: u16,
+        /// Print the authorize URL and paste the code manually instead of listening
+        #[arg(long)]
+        paste: bool,
     },
     /// List configured account aliases (never prints secrets)
     #[command(after_help = "Example: clickup-cli account list")]
@@ -2700,19 +2731,54 @@ async fn dispatch_account(cli: &Cli, action: &AccountAction) -> Result<Value, Cl
         AccountAction::Add {
             alias,
             workspace_id,
+            flow,
+            client_id,
+            port,
+            paste,
         } => {
-            let token = resolve_token()?;
             let base =
                 std::env::var("CLICKUP_API_BASE").unwrap_or_else(|_| DEFAULT_BASE.to_string());
-            account::add(
-                &config_path,
-                &store,
-                &base,
-                alias,
-                token,
-                workspace_id.clone(),
-            )
-            .await
+            match flow {
+                AuthFlowArg::Token => {
+                    let token = resolve_token()?;
+                    account::add(
+                        &config_path,
+                        &store,
+                        &base,
+                        alias,
+                        token,
+                        workspace_id.clone(),
+                    )
+                    .await
+                }
+                AuthFlowArg::Oauth => {
+                    let client_id = resolve_client_id(client_id.as_deref())?;
+                    let client_secret = resolve_client_secret()?;
+                    let access_token =
+                        run_oauth_browser_flow(&base, &client_id, &client_secret, *port, *paste)
+                            .await?;
+                    account::finish_oauth_add(
+                        &config_path,
+                        &store,
+                        &base,
+                        alias,
+                        client_id,
+                        client_secret,
+                        access_token,
+                        workspace_id.clone(),
+                    )
+                    .await
+                }
+            }
+        }
+        AccountAction::Login { alias, port, paste } => {
+            let base =
+                std::env::var("CLICKUP_API_BASE").unwrap_or_else(|_| DEFAULT_BASE.to_string());
+            let (client_id, client_secret) = account::oauth_client_credentials(&store, alias)?;
+            let access_token =
+                run_oauth_browser_flow(&base, &client_id, &client_secret, *port, *paste).await?;
+            account::store_refreshed_token(&store, alias, access_token)?;
+            Ok(serde_json::json!({"ok": true, "alias": alias, "reauthorized": true}))
         }
         AccountAction::List => account::list(&config_path),
         AccountAction::SetDefault { alias } => account::set_default(&config_path, alias),
@@ -2738,6 +2804,89 @@ fn resolve_token() -> Result<String, CliError> {
     Err(CliError::Usage(
         "set CLICKUP_CLI_TOKEN or run interactively to be prompted".into(),
     ))
+}
+
+fn resolve_client_id(flag: Option<&str>) -> Result<String, CliError> {
+    if let Some(client_id) = flag {
+        return Ok(client_id.to_string());
+    }
+    if std::io::stdin().is_terminal() {
+        eprint!("ClickUp OAuth app client id: ");
+        let mut line = String::new();
+        std::io::stdin()
+            .read_line(&mut line)
+            .map_err(|read_error| {
+                CliError::Usage(format!("failed to read client id: {read_error}"))
+            })?;
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+    Err(CliError::Usage(
+        "pass --client-id or run interactively to be prompted".into(),
+    ))
+}
+
+/// Like the personal token, the client secret never travels as a flag.
+fn resolve_client_secret() -> Result<String, CliError> {
+    if let Ok(secret) = std::env::var("CLICKUP_CLI_CLIENT_SECRET") {
+        return Ok(secret);
+    }
+    if std::io::stdin().is_terminal() {
+        return rpassword::prompt_password("ClickUp OAuth app client secret: ").map_err(
+            |read_error| CliError::Usage(format!("failed to read client secret: {read_error}")),
+        );
+    }
+    Err(CliError::Usage(
+        "set CLICKUP_CLI_CLIENT_SECRET or run interactively to be prompted".into(),
+    ))
+}
+
+/// Browser half of the OAuth flow: untestable glue over the tested pieces in
+/// crate::oauth. With --paste the listener is skipped and the code is read from stdin.
+async fn run_oauth_browser_flow(
+    base: &str,
+    client_id: &str,
+    client_secret: &str,
+    port: u16,
+    paste: bool,
+) -> Result<String, CliError> {
+    use rand::Rng as _;
+    let state: String = rand::rng()
+        .sample_iter(rand::distr::Alphanumeric)
+        .take(32)
+        .map(char::from)
+        .collect();
+
+    let redirect_uri = format!("http://localhost:{port}");
+    let code = if paste {
+        // Same registered redirect URL as the listener flow — ClickUp rejects any
+        // unregistered redirect_uri. With nothing listening, the browser lands on an
+        // error page whose address bar still carries the ?code=… to copy.
+        let authorize = crate::oauth::authorize_url(client_id, &redirect_uri, &state);
+        eprintln!("Open this URL, authorize, then paste the code from the redirect URL:");
+        eprintln!("{authorize}");
+        eprint!("code: ");
+        let mut line = String::new();
+        std::io::stdin()
+            .read_line(&mut line)
+            .map_err(|read_error| CliError::Usage(format!("failed to read code: {read_error}")))?;
+        let code = line.trim().to_string();
+        if code.is_empty() {
+            return Err(CliError::Usage("no authorization code entered".into()));
+        }
+        code
+    } else {
+        let listener = crate::oauth::bind_loopback(port)?;
+        let authorize = crate::oauth::authorize_url(client_id, &redirect_uri, &state);
+        eprintln!("Opening your browser to authorize clickup-cli…");
+        eprintln!("(if nothing opens, visit: {authorize})");
+        let _ = webbrowser::open(&authorize);
+        crate::oauth::catch_redirect(listener, &state, std::time::Duration::from_secs(300)).await?
+    };
+
+    crate::oauth::exchange_code(base, client_id, client_secret, &code).await
 }
 
 #[cfg(test)]
@@ -2792,6 +2941,7 @@ mod tests {
                 AccountAction::Add {
                     alias,
                     workspace_id,
+                    ..
                 },
         } = cli.command
         else {
@@ -2920,6 +3070,54 @@ mod tests {
             "QA steps",
         ])
         .expect("checklist create should parse");
+    }
+
+    #[test]
+    fn oauth_account_add_and_login_parse() {
+        let add = Cli::try_parse_from([
+            "clickup-cli",
+            "account",
+            "add",
+            "cp",
+            "--flow",
+            "oauth",
+            "--client-id",
+            "ABC123",
+            "--port",
+            "8899",
+        ])
+        .expect("oauth account add should parse");
+        match add.command {
+            Command::Account {
+                action:
+                    AccountAction::Add {
+                        flow,
+                        client_id,
+                        port,
+                        paste,
+                        ..
+                    },
+            } => {
+                assert!(matches!(flow, AuthFlowArg::Oauth));
+                assert_eq!(client_id.as_deref(), Some("ABC123"));
+                assert_eq!(port, 8899);
+                assert!(!paste);
+            }
+            _ => panic!("expected an account add command"),
+        }
+
+        // The default flow stays token, so the existing bootstrap is unchanged.
+        let default_add = Cli::try_parse_from(["clickup-cli", "account", "add", "work"])
+            .expect("token account add should parse");
+        match default_add.command {
+            Command::Account {
+                action: AccountAction::Add { flow, .. },
+            } => assert!(matches!(flow, AuthFlowArg::Token)),
+            _ => panic!("expected an account add command"),
+        }
+
+        Cli::try_parse_from(["clickup-cli", "account", "login", "cp"])
+            .expect("account login should parse");
     }
 
     #[test]

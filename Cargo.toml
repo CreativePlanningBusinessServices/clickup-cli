@@ -1,6 +1,6 @@
 [package]
 name = "clickup-cli"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "ClickUp API CLI for AI agents — tasks, lists, docs, comments, time tracking"
 
@@ -15,6 +15,8 @@ keyring = { version = "3", features = ["apple-native", "windows-native"] }
 directories = "6"
 percent-encoding = "2"
 toml = "0.8"
+webbrowser = "1"
+rand = "0.9"
 self_update = { version = "0.42", default-features = false, features = ["rustls", "archive-zip", "compression-zip-deflate"] }
 rpassword = "7"
 
