@@ -6,9 +6,10 @@ use serde_json::Value;
 
 use crate::client::CuClient;
 use crate::commands;
+use crate::commands::template::TemplateKind;
 use crate::commands::{
-    account, chat, checklist, comment, config_cmd, doc, field, folder, goal, list, raw, space, tag,
-    task, time, view, workspace,
+    account, chat, checklist, comment, config_cmd, doc, field, folder, goal, group, list, raw,
+    space, tag, task, template, time, user, view, webhook, workspace,
 };
 use crate::context::{DEFAULT_BASE, context_for};
 use crate::error::CliError;
@@ -136,6 +137,26 @@ pub enum Command {
     Chat {
         #[command(subcommand)]
         action: ChatAction,
+    },
+    /// Workspace members: get, invite, edit, remove
+    User {
+        #[command(subcommand)]
+        action: UserAction,
+    },
+    /// Workspace-wide user groups
+    Group {
+        #[command(subcommand)]
+        action: GroupAction,
+    },
+    /// Webhook subscriptions
+    Webhook {
+        #[command(subcommand)]
+        action: WebhookAction,
+    },
+    /// Task/list/folder templates
+    Template {
+        #[command(subcommand)]
+        action: TemplateAction,
     },
 }
 
@@ -1459,6 +1480,125 @@ pub enum ChatMessageAction {
     TaggedUsers { message_id: String },
 }
 
+#[derive(Subcommand)]
+pub enum UserAction {
+    /// Get a single workspace member
+    #[command(after_help = "Example: clickup-cli user get 75413867 --include-shared")]
+    Get {
+        user_id: String,
+        #[arg(long = "include-shared")]
+        include_shared: bool,
+    },
+    /// Invite a user to the workspace
+    #[command(
+        after_help = "Example: clickup-cli user invite --email jo@cp.com --admin\n\nRequires a workspace-level (Business+) plan that supports API invites."
+    )]
+    Invite {
+        #[arg(long)]
+        email: String,
+        #[arg(long)]
+        admin: bool,
+        #[arg(long = "custom-role-id")]
+        custom_role_id: Option<i64>,
+    },
+    /// Edit a workspace member
+    #[command(
+        after_help = "Example: clickup-cli user edit 75413867 --data '{\"username\": \"Jo\", \"admin\": false, \"custom_role_id\": null}'\n\nClickUp's PUT requires username, admin, and custom_role_id all be present in the body."
+    )]
+    Edit {
+        user_id: String,
+        #[arg(long)]
+        data: Option<String>,
+    },
+    /// Remove a user from the workspace
+    #[command(after_help = "Example: clickup-cli user remove 75413867")]
+    Remove { user_id: String },
+}
+
+#[derive(Subcommand)]
+pub enum GroupAction {
+    /// List user groups in the current workspace
+    #[command(
+        after_help = "Examples:\n  clickup-cli group list\n  clickup-cli group list --group-ids id1,id2"
+    )]
+    List {
+        /// Comma-separated group ids to filter to
+        #[arg(long = "group-ids")]
+        group_ids: Option<String>,
+    },
+    /// Create a user group
+    #[command(
+        after_help = "Example: clickup-cli group create --name eng --member 75413867 --member 123"
+    )]
+    Create {
+        #[arg(long)]
+        name: String,
+        /// Repeatable; user id to add as a member
+        #[arg(long = "member")]
+        member: Vec<String>,
+        /// Request body: inline JSON, @file, or - for stdin; merged under --name/--member
+        #[arg(long)]
+        data: Option<String>,
+    },
+    /// Update a user group
+    #[command(
+        after_help = "Example: clickup-cli group update grp1 --data '{\"name\": \"renamed\"}'"
+    )]
+    Update {
+        group_id: String,
+        #[arg(long)]
+        data: Option<String>,
+    },
+    /// Delete a user group
+    #[command(after_help = "Example: clickup-cli group delete grp1")]
+    Delete { group_id: String },
+}
+
+#[derive(Subcommand)]
+pub enum WebhookAction {
+    /// List webhooks registered on the current workspace
+    #[command(after_help = "Example: clickup-cli webhook list")]
+    List,
+    /// Create a webhook subscription
+    #[command(
+        after_help = "Example: clickup-cli webhook create --endpoint https://x.example/hook --event taskUpdated --event taskDeleted\n\nThe literal --event '*' subscribes to every event. The response includes webhook.secret — save it, it's needed to verify the X-Signature header on incoming deliveries."
+    )]
+    Create {
+        #[arg(long)]
+        endpoint: String,
+        /// Repeatable; event name to subscribe to, or "*" for everything
+        #[arg(long = "event")]
+        event: Vec<String>,
+        /// Request body: inline JSON, @file, or - for stdin; merged under --endpoint/--event
+        #[arg(long)]
+        data: Option<String>,
+    },
+    /// Update a webhook
+    #[command(
+        after_help = "Example: clickup-cli webhook update wh1 --data '{\"status\": \"active\"}'"
+    )]
+    Update {
+        webhook_id: String,
+        #[arg(long)]
+        data: Option<String>,
+    },
+    /// Delete a webhook
+    #[command(after_help = "Example: clickup-cli webhook delete wh1")]
+    Delete { webhook_id: String },
+}
+
+#[derive(Subcommand)]
+pub enum TemplateAction {
+    /// List templates of one kind (task, list, or folder)
+    #[command(after_help = "Example: clickup-cli template list task --page 0")]
+    List {
+        #[arg(value_enum, ignore_case = true)]
+        kind: TemplateKind,
+        #[arg(long)]
+        page: Option<u64>,
+    },
+}
+
 pub async fn cli_main() -> i32 {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -1539,6 +1679,10 @@ async fn dispatch(cli: &Cli) -> Result<Value, CliError> {
         Command::Goal { action } => dispatch_goal(cli, action).await,
         Command::Doc { action } => dispatch_doc(cli, action).await,
         Command::Chat { action } => dispatch_chat(cli, action).await,
+        Command::User { action } => dispatch_user(cli, action).await,
+        Command::Group { action } => dispatch_group(cli, action).await,
+        Command::Webhook { action } => dispatch_webhook(cli, action).await,
+        Command::Template { action } => dispatch_template(cli, action).await,
     }
 }
 
@@ -2439,6 +2583,70 @@ async fn dispatch_chat_message(
         ChatMessageAction::TaggedUsers { message_id } => {
             chat::tagged_users(client, message_id).await
         }
+    }
+}
+
+async fn dispatch_user(cli: &Cli, action: &UserAction) -> Result<Value, CliError> {
+    let context = context_for(cli.account.as_deref(), cli.workspace.as_deref())?;
+    match action {
+        UserAction::Get {
+            user_id,
+            include_shared,
+        } => user::get(&context.client, user_id, *include_shared).await,
+        UserAction::Invite {
+            email,
+            admin,
+            custom_role_id,
+        } => user::invite(&context.client, email, *admin, *custom_role_id).await,
+        UserAction::Edit { user_id, data } => {
+            let body = commands::parse_data_flag(data.as_deref())?;
+            user::edit(&context.client, user_id, body).await
+        }
+        UserAction::Remove { user_id } => user::remove(&context.client, user_id).await,
+    }
+}
+
+async fn dispatch_group(cli: &Cli, action: &GroupAction) -> Result<Value, CliError> {
+    let context = context_for(cli.account.as_deref(), cli.workspace.as_deref())?;
+    match action {
+        GroupAction::List { group_ids } => group::list(&context.client, group_ids.clone()).await,
+        GroupAction::Create { name, member, data } => {
+            let data = commands::parse_data_flag(data.as_deref())?;
+            let body = group::build_create_body(data, name, member);
+            group::create(&context.client, body).await
+        }
+        GroupAction::Update { group_id, data } => {
+            let body = commands::parse_data_flag(data.as_deref())?;
+            group::update(&context.client, group_id, body).await
+        }
+        GroupAction::Delete { group_id } => group::delete(&context.client, group_id).await,
+    }
+}
+
+async fn dispatch_webhook(cli: &Cli, action: &WebhookAction) -> Result<Value, CliError> {
+    let context = context_for(cli.account.as_deref(), cli.workspace.as_deref())?;
+    match action {
+        WebhookAction::List => webhook::list(&context.client).await,
+        WebhookAction::Create {
+            endpoint,
+            event,
+            data,
+        } => {
+            let data = commands::parse_data_flag(data.as_deref())?;
+            webhook::create(&context.client, endpoint, event, data).await
+        }
+        WebhookAction::Update { webhook_id, data } => {
+            let body = commands::parse_data_flag(data.as_deref())?;
+            webhook::update(&context.client, webhook_id, body).await
+        }
+        WebhookAction::Delete { webhook_id } => webhook::delete(&context.client, webhook_id).await,
+    }
+}
+
+async fn dispatch_template(cli: &Cli, action: &TemplateAction) -> Result<Value, CliError> {
+    let context = context_for(cli.account.as_deref(), cli.workspace.as_deref())?;
+    match action {
+        TemplateAction::List { kind, page } => template::list(&context.client, *kind, *page).await,
     }
 }
 

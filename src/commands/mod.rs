@@ -7,13 +7,17 @@ pub mod doc;
 pub mod field;
 pub mod folder;
 pub mod goal;
+pub mod group;
 pub mod list;
 pub mod raw;
 pub mod space;
 pub mod tag;
 pub mod task;
+pub mod template;
 pub mod time;
+pub mod user;
 pub mod view;
+pub mod webhook;
 pub mod workspace;
 
 use std::io::Read;
