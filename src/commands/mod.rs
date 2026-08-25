@@ -22,10 +22,33 @@ pub mod workspace;
 
 use std::io::Read;
 
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::{Value, json};
 
 use crate::client::{CuClient, CuResponse};
 use crate::error::CliError;
+
+/// Characters a URL path segment can carry unescaped, on top of ASCII alphanumerics: the
+/// unreserved marks `-._~` (RFC 3986 §2.3). Everything else — including space and `/`, which
+/// would otherwise split the path into extra segments — gets percent-encoded.
+const PATH_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
+
+/// Percent-encodes free text for use as a single URL path segment — e.g. a tag name with a
+/// space (`"high priority"` → `high%20priority`) or a reaction emoji name with a `+`
+/// (`"+1"` → `%2B1`) — anything that isn't valid raw in a path segment, including characters
+/// like `/` that would otherwise split the path into extra segments. `client.rs`'s
+/// `resolve_url` does no escaping of its own, so any caller interpolating free text into a
+/// path (not a query param, which reqwest already encodes) must go through this first. Note
+/// this is `%20` (path-segment percent-encoding, RFC 3986), not `+`
+/// (`application/x-www-form-urlencoded` query-string encoding, which `url::form_urlencoded`
+/// produces and which servers only decode as a space inside a query string).
+pub fn encode_path_segment(raw: &str) -> String {
+    utf8_percent_encode(raw, PATH_SEGMENT).to_string()
+}
 
 /// Hard cap on pages `merge_task_pages` will fetch for a single `--all` request, so a
 /// misbehaving or unbounded endpoint can't loop forever.
@@ -259,6 +282,18 @@ mod tests {
     use std::io::Write;
 
     use super::*;
+
+    #[test]
+    fn encode_path_segment_percent_encodes_spaces_and_reserved_characters() {
+        assert_eq!(encode_path_segment("high priority"), "high%20priority");
+        assert_eq!(encode_path_segment("urgent"), "urgent");
+        // A slash must not be allowed to split the path into extra segments.
+        assert_eq!(encode_path_segment("a/b"), "a%2Fb");
+        // A reaction emoji name like "+1" must not leave a raw '+' in the path — some servers
+        // decode a bare '+' as a space (application/x-www-form-urlencoded semantics), which
+        // would corrupt the reaction name.
+        assert_eq!(encode_path_segment("+1"), "%2B1");
+    }
 
     #[test]
     fn reads_inline_json() {

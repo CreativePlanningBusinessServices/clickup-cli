@@ -1,18 +1,8 @@
-use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::{Value, json};
 
 use crate::client::CuClient;
-use crate::commands::pass_through;
+use crate::commands::{encode_path_segment, pass_through};
 use crate::error::CliError;
-
-/// Characters a URL path segment can carry unescaped, on top of ASCII alphanumerics: the
-/// unreserved marks `-._~` (RFC 3986 §2.3). Everything else — including space and `/`, which
-/// would otherwise split the path into extra segments — gets percent-encoded.
-const PATH_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
-    .remove(b'-')
-    .remove(b'.')
-    .remove(b'_')
-    .remove(b'~');
 
 pub async fn list(client: &CuClient, space_id: &str) -> Result<Value, CliError> {
     let path = format!("/api/v2/space/{space_id}/tag");
@@ -77,11 +67,9 @@ pub async fn delete(client: &CuClient, space_id: &str, tag_name: &str) -> Result
 /// Percent-encodes a tag name for use as a URL path segment — tag names can contain spaces
 /// (e.g. `"high priority"` → `high%20priority`) or other reserved characters (e.g. a `/`,
 /// which would otherwise split the path into extra segments), which aren't valid raw in a path
-/// segment. Note this is `%20` (path-segment percent-encoding, RFC 3986), not `+`
-/// (`application/x-www-form-urlencoded` query-string encoding, which `url::form_urlencoded`
-/// produces and which servers only decode as a space inside a query string).
+/// segment. Delegates to the shared `commands::encode_path_segment` helper.
 fn encode_tag_name(tag_name: &str) -> String {
-    utf8_percent_encode(tag_name, PATH_SEGMENT).to_string()
+    encode_path_segment(tag_name)
 }
 
 #[cfg(test)]

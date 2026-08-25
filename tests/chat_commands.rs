@@ -308,6 +308,29 @@ async fn react_and_unreact_hit_reaction_paths() {
     );
 }
 
+/// `reaction` is free text interpolated into the URL path (not a query param, which reqwest
+/// already encodes), so a reaction name like `"+1"` must be percent-encoded before it's sent —
+/// otherwise a raw `+` could be decoded as a space by the server, or otherwise malform the path.
+#[tokio::test]
+async fn unreact_percent_encodes_reaction_with_special_characters() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path(
+            "/api/v3/workspaces/9001/chat/messages/msg1/reactions/%2B1",
+        ))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = common::client_for(&server);
+    let unreact_result = chat::unreact(&client, "msg1", "+1").await.unwrap();
+    assert_eq!(
+        unreact_result,
+        json!({"deleted": true, "message_id": "msg1", "reaction": "+1"})
+    );
+}
+
 #[tokio::test]
 async fn reactions_hits_reactions_path() {
     let server = MockServer::start().await;

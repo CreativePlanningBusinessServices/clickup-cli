@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 use crate::client::CuClient;
-use crate::commands::{merge_cursor_pages, merge_flag, pass_through};
+use crate::commands::{encode_path_segment, merge_cursor_pages, merge_flag, pass_through};
 use crate::error::CliError;
 
 fn chat_path(client: &CuClient) -> Result<String, CliError> {
@@ -210,15 +210,19 @@ pub async fn react(client: &CuClient, message_id: &str, reaction: &str) -> Resul
 }
 
 /// ClickUp's unreact returns 204 with no body; synthesize an acknowledgement instead of
-/// surfacing the bare status code.
+/// surfacing the bare status code. `reaction` is free text (emoji names can contain characters
+/// like `+`, e.g. `"+1"`) interpolated into the URL path, so it's percent-encoded first — a
+/// raw `+`/space/`/` here would otherwise malform or misdirect the request (`client.rs`'s
+/// `resolve_url` does no escaping of its own).
 pub async fn unreact(
     client: &CuClient,
     message_id: &str,
     reaction: &str,
 ) -> Result<Value, CliError> {
     let path = format!(
-        "{}/messages/{message_id}/reactions/{reaction}",
-        chat_path(client)?
+        "{}/messages/{message_id}/reactions/{}",
+        chat_path(client)?,
+        encode_path_segment(reaction)
     );
     client
         .request(reqwest::Method::DELETE, &path, &[], None)
