@@ -9,7 +9,7 @@ use crate::commands;
 use crate::commands::template::TemplateKind;
 use crate::commands::{
     account, chat, checklist, comment, config_cmd, doc, field, folder, goal, group, list, raw,
-    space, tag, task, template, time, user, view, webhook, workspace,
+    skill, space, tag, task, template, time, user, view, webhook, workspace,
 };
 use crate::context::{DEFAULT_BASE, context_for};
 use crate::error::CliError;
@@ -157,6 +157,24 @@ pub enum Command {
     Template {
         #[command(subcommand)]
         action: TemplateAction,
+    },
+    /// Install or refresh the bundled agent skill (SKILL.md) into your Claude skills dir
+    #[command(
+        after_help = "Examples:\n  clickup-cli skill install\n  clickup-cli skill install --dir ~/.config/claude/skills/clickup-cli"
+    )]
+    Skill {
+        #[command(subcommand)]
+        action: SkillAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SkillAction {
+    /// Write the embedded SKILL.md to your Claude skills dir (skips a symlinked/repo-tracked copy)
+    Install {
+        /// Target dir (default: $CLAUDE_CONFIG_DIR or ~/.claude, under skills/clickup-cli)
+        #[arg(long)]
+        dir: Option<PathBuf>,
     },
 }
 
@@ -1683,6 +1701,9 @@ async fn dispatch(cli: &Cli) -> Result<Value, CliError> {
         Command::Group { action } => dispatch_group(cli, action).await,
         Command::Webhook { action } => dispatch_webhook(cli, action).await,
         Command::Template { action } => dispatch_template(cli, action).await,
+        Command::Skill { action } => match action {
+            SkillAction::Install { dir } => skill::install(dir.as_deref()),
+        },
     }
 }
 

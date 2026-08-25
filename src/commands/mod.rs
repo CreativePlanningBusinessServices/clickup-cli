@@ -10,6 +10,7 @@ pub mod goal;
 pub mod group;
 pub mod list;
 pub mod raw;
+pub mod skill;
 pub mod space;
 pub mod tag;
 pub mod task;
