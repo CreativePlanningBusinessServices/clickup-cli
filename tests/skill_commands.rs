@@ -56,6 +56,10 @@ fn install_skips_a_symlinked_target_dir() {
     );
 }
 
+// On Windows `directories` resolves the home dir through the Known Folder API,
+// so overriding $HOME cannot redirect it into a tempdir — same limitation as
+// tests/cli_smoke.rs, same gate.
+#[cfg(not(windows))]
 #[test]
 fn install_skips_home_fallback_when_claude_config_dir_missing() {
     let _guard = ENV_LOCK.lock().unwrap();
