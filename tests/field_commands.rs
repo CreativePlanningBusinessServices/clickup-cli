@@ -59,13 +59,15 @@ async fn field_list_hits_list_folder_and_space_paths() {
 
 /// A bare word (no quotes, fails JSON parsing) becomes a plain JSON string — the whole point of
 /// `read_value_arg` is that agents don't need to double-quote simple values like "hello".
+/// ClickUp answers `field set` with a bare `{}`, indistinguishable from a no-op, so `set`
+/// synthesizes an acknowledgement the way `remove` does.
 #[tokio::test]
-async fn field_set_wraps_value() {
+async fn field_set_wraps_value_and_synthesizes_ack() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/api/v2/task/868k5a5wa/field/FIELD_UUID"))
         .and(body_json(json!({"value": "hello"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "FIELD_UUID"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
         .expect(1)
         .mount(&server)
         .await;
@@ -75,7 +77,10 @@ async fn field_set_wraps_value() {
     let result = field::set(&client, "868k5a5wa", "FIELD_UUID", false, value, None)
         .await
         .unwrap();
-    assert_eq!(result["id"], "FIELD_UUID");
+    assert_eq!(
+        result,
+        json!({"set": true, "task_id": "868k5a5wa", "field_id": "FIELD_UUID"})
+    );
 }
 
 #[tokio::test]
@@ -84,7 +89,7 @@ async fn field_set_passes_object_values_through() {
     Mock::given(method("POST"))
         .and(path("/api/v2/task/868k5a5wa/field/FIELD_UUID"))
         .and(body_json(json!({"value": {"add": ["uuid1"]}})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "FIELD_UUID"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
         .expect(1)
         .mount(&server)
         .await;
@@ -94,7 +99,7 @@ async fn field_set_passes_object_values_through() {
     let result = field::set(&client, "868k5a5wa", "FIELD_UUID", false, value, None)
         .await
         .unwrap();
-    assert_eq!(result["id"], "FIELD_UUID");
+    assert_eq!(result["set"], true);
 }
 
 #[tokio::test]
@@ -105,7 +110,7 @@ async fn field_set_with_options_adds_value_options() {
         .and(body_json(
             json!({"value": 5, "value_options": {"time": true}}),
         ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "FIELD_UUID"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
         .expect(1)
         .mount(&server)
         .await;
@@ -121,7 +126,7 @@ async fn field_set_with_options_adds_value_options() {
     )
     .await
     .unwrap();
-    assert_eq!(result["id"], "FIELD_UUID");
+    assert_eq!(result["set"], true);
 }
 
 #[tokio::test]
@@ -131,7 +136,7 @@ async fn field_set_with_custom_id_adds_custom_task_ids_query() {
         .and(path("/api/v2/task/DEV-123/field/FIELD_UUID"))
         .and(query_param("custom_task_ids", "true"))
         .and(query_param("team_id", "9001"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "FIELD_UUID"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
         .expect(1)
         .mount(&server)
         .await;
@@ -147,7 +152,10 @@ async fn field_set_with_custom_id_adds_custom_task_ids_query() {
     )
     .await
     .unwrap();
-    assert_eq!(result["id"], "FIELD_UUID");
+    assert_eq!(
+        result,
+        json!({"set": true, "task_id": "DEV-123", "field_id": "FIELD_UUID"})
+    );
 }
 
 #[tokio::test]

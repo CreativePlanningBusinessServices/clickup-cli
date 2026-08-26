@@ -66,6 +66,9 @@ First account added becomes the default; select others with `--account <alias>` 
   `clickup-cli task filter --assignee 75413867 --all`
 - **Create a task with custom fields:**
   `clickup-cli task create 124 --name "Fix login" --data '{"custom_fields":[{"id":"FIELD_UUID","value":"urgent"}]}'`
+- **Change a custom field on an existing task:** only via
+  `clickup-cli field set <task-id> <field-id> --value <json>` — ClickUp's task-update endpoint
+  silently drops `custom_fields`, so `task update` rejects a body containing that key.
 - **Post a comment:** `clickup-cli comment create --task 868k5a5wa --text "Deployed."`
 - **Move vs add-to-list:** `task move` relocates a task out of its current list;
   `list add-task` puts the *same* task into an additional list without removing it from the

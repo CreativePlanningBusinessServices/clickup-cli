@@ -58,6 +58,8 @@ pub fn build_set_body(value: Value, options: Option<Value>) -> Value {
     body
 }
 
+/// ClickUp answers with a bare `{}` on success, indistinguishable from a no-op; synthesize an
+/// acknowledgement the way `remove` does.
 pub async fn set(
     client: &CuClient,
     task_id: &str,
@@ -69,10 +71,10 @@ pub async fn set(
     let path = format!("/api/v2/task/{task_id}/field/{field_id}");
     let query = custom_id_query(client, custom_id)?;
     let body = build_set_body(value, options);
-    let response = client
+    client
         .request(reqwest::Method::POST, &path, &query, Some(body))
         .await?;
-    Ok(pass_through(response))
+    Ok(json!({"set": true, "task_id": task_id, "field_id": field_id}))
 }
 
 /// ClickUp's remove returns 204 with no body; synthesize an acknowledgement instead of
