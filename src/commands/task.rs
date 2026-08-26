@@ -37,12 +37,22 @@ pub async fn get(
     Ok(pass_through(response))
 }
 
+/// ClickUp's PUT /task silently ignores a `custom_fields` key — it returns 200 with the old
+/// field values, so a caller can't tell the write was dropped (create's POST honors it; only
+/// update is affected). Reject the body up front and point at the endpoint that works.
 pub async fn update(
     client: &CuClient,
     task_id: &str,
     custom_id: bool,
     data: Value,
 ) -> Result<Value, CliError> {
+    if data.get("custom_fields").is_some() {
+        return Err(CliError::Usage(
+            "ClickUp's task update endpoint silently ignores custom_fields; \
+             use `clickup-cli field set <task-id> <field-id> --value <json>` instead"
+                .to_string(),
+        ));
+    }
     let path = format!("/api/v2/task/{task_id}");
     let query = custom_id_query(client, custom_id)?;
     let response = client

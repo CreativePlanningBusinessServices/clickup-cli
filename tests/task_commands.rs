@@ -1,6 +1,7 @@
 mod common;
 
 use clickup_cli::commands::task::{self, TaskListArgs};
+use clickup_cli::error::CliError;
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -143,6 +144,47 @@ async fn filter_hits_team_scoped_path() {
     .await
     .unwrap();
     assert_eq!(result["tasks"], json!([]));
+}
+
+#[tokio::test]
+async fn update_puts_body_to_task_path() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v2/task/abc123"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"id": "abc123", "name": "Renamed"})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let result = task::update(
+        &common::client_for(&server),
+        "abc123",
+        false,
+        json!({"name": "Renamed"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["name"], "Renamed");
+}
+
+/// ClickUp's PUT /task silently drops a `custom_fields` key (200 with the old value), so the
+/// CLI must refuse the body before any request goes out — no mock is mounted here, and a
+/// request slipping through would surface as an Api error, not the expected Usage error.
+#[tokio::test]
+async fn update_rejects_custom_fields_with_usage_error_naming_field_set() {
+    let server = MockServer::start().await;
+
+    let body = json!({
+        "name": "Renamed",
+        "custom_fields": [{"id": "FIELD_UUID", "value": "x"}],
+    });
+    let error = task::update(&common::client_for(&server), "abc123", false, body)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, CliError::Usage(_)));
+    assert!(error.to_string().contains("field set"));
 }
 
 #[tokio::test]
